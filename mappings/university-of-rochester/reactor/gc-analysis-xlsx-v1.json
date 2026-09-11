@@ -1,0 +1,24 @@
+{
+  "id": "university-of-rochester/reactor/gc-analysis-xlsx/v1",
+  "entity": "university-of-rochester",
+  "modality": "reactor",
+  "source_format_version": "gc-analysis-xlsx/v1",
+  "version": "0.1.0",
+  "canonical_schema_version": "0.1.0",
+  "status": "draft",
+  "kind": "gc_processed",
+  "source_format": "xlsx",
+  "sheet_name": "Processed",
+  "signature": {"A1": "Use in SS summary", "B1": "Row status", "C1": "Accepted point", "D1": "Time on stream h", "E1": "Injection #", "F1": "Catalyst ID", "G1": "CO2 out sccm", "H1": "CO2 conversion %", "I1": "Product C out", "J1": "Carbon balance %", "K1": "Sel CO %", "L1": "Sel CH4 %", "M1": "Sel C2+ %", "N1": "Flow CO2 sccm", "O1": "Flow CO sccm", "P1": "Flow CH4 sccm", "Q1": "Flow C2H6 sccm", "R1": "Flow C2H4 sccm", "S1": "Flow C3H8 sccm", "T1": "Flow C3H6 sccm", "U1": "Raw label"},
+  "required_sheets": ["Settings", "Raw Original", "Bypass Original", "Bypass Processed"],
+  "raw_dependency_sheets": ["Raw Original", "Bypass Original"],
+  "literal_settings": {
+    "catalyst_mass_mg": {"target": "catalyst_mass_g", "source_unit": "mg", "unit": "g", "factor": "0.001", "context": "partner_declared"},
+    "injection_interval_min": {"target": "nominal_injection_interval_s", "source_unit": "min", "unit": "s", "factor": "60", "context": "processing_settings"},
+    "space_velocity_reference_temperature_K": {"target": "space_velocity_reference_temperature_K", "source_unit": "K", "unit": "K", "factor": "1", "context": "processing_settings"},
+    "space_velocity_reference_pressure_atm": {"target": "space_velocity_reference_pressure_Pa", "source_unit": "atm", "unit": "Pa", "factor": "101325", "context": "processing_settings"}
+  },
+  "source_field_renames": {
+    "calculated_GHSV_mL_g_hr": "feed_volumetric_flow_per_catalyst_mass_mL_g_h"
+  }
+}

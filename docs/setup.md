@@ -6,6 +6,10 @@
 - Initial modalities: reactor data, catalyst synthesis, and spectroscopy.
 - Destination objects: propose after inspecting representative data and the SciSure tenant.
 - Deployment platform: not selected or provisioned.
+- Initial environment: `https://sandbox.elabjournal.com`, confirmed by the user after login. A credential-free GET to `/api/v1/addons/licenses` returned 401 on September 11, 2026. This establishes a reachable protected endpoint, not permission to a group or access to its records.
+- Initial examples: raw and reprocessed packed-bed reactor GC workbooks from University of Rochester. The user confirmed they represent the same run and that original row labels were wrong. Originals and extracted research values are excluded from GitHub.
+
+The earlier proposed `catalyst.elabjournal.com` hostname did not resolve from the development environment and has been superseded by the confirmed sandbox address.
 
 ## Find the SciSure environment
 

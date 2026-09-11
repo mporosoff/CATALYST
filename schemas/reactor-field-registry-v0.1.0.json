@@ -1,0 +1,12 @@
+{
+  "version": "0.1.0",
+  "status": "draft",
+  "modality": "reactor",
+  "fields": {
+    "catalyst_mass_g": {"quantity": "mass", "unit": "g", "meaning": "Partner-declared catalyst mass; material basis must be reviewed."},
+    "nominal_injection_interval_s": {"quantity": "time", "unit": "s", "meaning": "Nominal processing interval; not an observed injection timestamp."},
+    "space_velocity_reference_temperature_K": {"quantity": "temperature", "unit": "K", "meaning": "Reference condition for the partner's space-velocity calculation; not reaction temperature or a verified MFC reference condition."},
+    "space_velocity_reference_pressure_Pa": {"quantity": "pressure", "unit": "Pa", "meaning": "Reference condition for the partner's space-velocity calculation; not reactor pressure."},
+    "feed_volumetric_flow_per_catalyst_mass_mL_g_h": {"quantity": "volumetric_flow_per_mass", "unit": "mL/(g*h)", "meaning": "Gas volume per time divided by catalyst mass; must not be represented as volume-based GHSV in h^-1."}
+  }
+}

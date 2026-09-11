@@ -4,7 +4,9 @@ An upload, review, and standardization application for catalysis data contribute
 
 ## Project status
 
-Repository setup is complete. Application implementation and deployment have not started. No SciSure credentials or research datasets are stored here, and no SciSure records have been created.
+The first offline ingestion component is implemented and tested against a University of Rochester raw GC report and its reprocessed workbook. It preserves source bytes, reads CSV/XLSX/flat-record JSON, applies two draft Rochester XLSX mapping profiles, and produces a source-located review preview. No SciSure credentials or research datasets are stored here, and no SciSure records have been created.
+
+The upload/review web application, authenticated backend, approval workflow, scientific processing recipes, and SciSure publication adapter are not implemented or deployed yet. This component is a processing-service building block, not a production web service.
 
 Confirmed MVP modalities:
 
@@ -12,7 +14,7 @@ Confirmed MVP modalities:
 - Catalyst synthesis
 - Spectroscopy data (specific techniques and export formats to be identified from examples)
 
-The remaining inputs are representative files from 2–3 entities and confirmation of an accessible SciSure environment/test group. SciSure destination objects will be proposed after inspecting the data and tenant.
+Initial data: University of Rochester packed-bed reactor GC export plus a reprocessed workbook, confirmed by the user to be the same run with superseded row labels. Additional entities and synthesis/spectroscopy examples remain outstanding. The initial SciSure environment is `https://sandbox.elabjournal.com`; an unauthenticated request returned HTTP 401. Group access and destination IDs are not yet verified.
 
 ## Intended workflow
 
@@ -37,7 +39,9 @@ Research data belongs in private application storage. App authorization must enf
 
 - [Setup and remaining inputs](docs/setup.md)
 - [Implementation requirements and acceptance checks](docs/implementation.md)
+- [Run the offline importer](docs/ingestion.md)
+- [Proposed SciSure object mapping](docs/scisure-destinations.md)
 
 ## Secrets
 
-Store `SCISURE_API_TOKEN` using the backend deployment platform's secret mechanism. Do not paste it into chat, commit it, place it in frontend settings, or expose it through browser requests or logs. `.env.example` documents proposed configuration names with empty values; it is not a working configuration.
+Store `SCISURE_API_TOKEN` using the backend deployment platform's secret mechanism. Do not paste it into chat, commit it, place it in frontend settings, or expose it through browser requests or logs. `.env.example` documents the development sandbox with empty token/group fields; it is not a working connection.
