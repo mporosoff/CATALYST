@@ -1,0 +1,44 @@
+# Backend credentials and local configuration
+.env
+.env.*
+!.env.example
+.dev.vars
+.dev.vars.*
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+credentials/
+
+# Private research artifacts and local state
+data/
+raw/
+uploads/
+artifacts/
+private-data/
+*.sqlite
+*.sqlite3
+*.db
+*.db-shm
+*.db-wal
+*.log
+
+# Generated dependencies, builds, and test output
+node_modules/
+dist/
+build/
+coverage/
+test-results/
+playwright-report/
+.wrangler/
+.sites-runtime/
+__pycache__/
+.pytest_cache/
+.venv/
+
+# Editor and operating system files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
