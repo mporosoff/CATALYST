@@ -90,6 +90,9 @@ next-env.d.ts
 /work/
 
 .test-build/
+.desktop-build/
+.desktop-venv/
+desktop-dist/
 *.tsbuildinfo
 
 # Required Sites build plugin is source, not generated output.

@@ -1,0 +1,2 @@
+# Only optional credential persistence needs a third-party runtime library.
+keyring==25.7.0
