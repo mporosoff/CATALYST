@@ -15,6 +15,13 @@
       "when": 1789229672802,
       "tag": "0001_salty_scarecrow",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1789233917351,
+      "tag": "0002_repair_rejected_test_project",
+      "breakpoints": true
     }
   ]
 }
