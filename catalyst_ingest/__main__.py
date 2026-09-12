@@ -10,6 +10,7 @@ import sys
 from . import __version__
 from .readers import InputError, MAX_FILE_BYTES, read_artifact
 from .preview import preview_artifact, review_pair
+from .toolkit import preview_toolkit_bundle
 
 
 def preserve_original(content, filename, root):
@@ -37,11 +38,14 @@ def main(argv=None):
     parser.add_argument('--reactor-type', choices=['packed_bed'], help='Explicitly supplied reactor configuration; never inferred from a filename.')
     parser.add_argument('--same-run', action='store_true', help='Explicit user confirmation that the two files are raw and reprocessed versions of one run, in that order.')
     parser.add_argument('--row-labels-superseded', action='store_true', help='Explicit user correction; original source labels remain preserved.')
+    parser.add_argument('--toolkit-gc-bundle', action='store_true', help='Import one Rochester toolkit RWGS revision: original XLSX, analysis XLSX, summary CSV, and flows CSV.')
     args = parser.parse_args(argv)
     if args.output.resolve() in [p.resolve() for p in args.files]:
         parser.error('Output cannot overwrite an input artifact.')
     if args.same_run and len(args.files) != 2 or args.row_labels_superseded and not args.same_run:
         parser.error('Relationship flags require exactly two files in raw, processed order and explicit same-run confirmation.')
+    if args.toolkit_gc_bundle and (args.same_run or args.row_labels_superseded):
+        parser.error('Toolkit bundle verification is separate from the legacy two-file relationship flags.')
     artifacts = []; previews = []
     try:
         for path in args.files:
@@ -53,6 +57,8 @@ def main(argv=None):
                 artifact['original_storage'] = preserve_original(content, path.name, args.store_root)
             artifacts.append(artifact); previews.append(preview)
         relationship = review_pair(*previews, same_run_confirmed=True, labels_superseded=args.row_labels_superseded) if args.same_run else None
+        if args.toolkit_gc_bundle:
+            previews = [preview_toolkit_bundle(artifacts, args.entity, args.modality)]
         report = {'schema_version': '0.1.0', 'created_at': datetime.now(timezone.utc).isoformat(),
                   'software_version': __version__, 'artifacts': artifacts, 'previews': previews,
                   'submission_context': {'source_entity': args.entity, 'reactor_type': args.reactor_type, 'basis': 'caller_supplied'},

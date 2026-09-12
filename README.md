@@ -4,7 +4,7 @@ An upload, review, and standardization application for catalysis data contribute
 
 ## Project status
 
-The first offline ingestion component is implemented and tested against a University of Rochester raw GC report and its reprocessed workbook. It preserves source bytes, reads CSV/XLSX/flat-record JSON, applies two draft Rochester XLSX mapping profiles, and produces a source-located review preview. No SciSure credentials or research datasets are stored here, and no SciSure records have been created.
+The offline ingestion component preserves source bytes, reads CSV/XLSX/flat-record JSON, and produces source-located review previews. It supports two draft Rochester XLSX profiles and a complete Rochester RWGS result bundle from the Porosoff Group catalysis toolkit. Bundle import retains numerical CSV results, verifies embedded raw values and row links, and keeps processing revisions separate. No SciSure credentials or research datasets are stored here, and no SciSure records have been created.
 
 The upload/review web application, authenticated backend, approval workflow, scientific processing recipes, and SciSure publication adapter are not implemented or deployed yet. This component is a processing-service building block, not a production web service.
 
@@ -40,6 +40,7 @@ Research data belongs in private application storage. App authorization must enf
 - [Setup and remaining inputs](docs/setup.md)
 - [Implementation requirements and acceptance checks](docs/implementation.md)
 - [Run the offline importer](docs/ingestion.md)
+- [Catalysis toolkit GC integration](docs/toolkit-gc.md)
 - [Proposed SciSure object mapping](docs/scisure-destinations.md)
 
 ## Secrets

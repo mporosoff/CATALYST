@@ -1,0 +1,32 @@
+{
+  "id": "ur-reactor-toolkit-gc-bundle-v1",
+  "entity": "university-of-rochester",
+  "modality": "reactor",
+  "source_format": "bundle",
+  "source_format_version": "catalysis-toolkit-gc-csv/2026-08",
+  "version": "0.1.0",
+  "canonical_schema_version": "0.1.0",
+  "status": "draft",
+  "kind": "gc_toolkit_bundle",
+  "supported_reactions": ["rwgs"],
+  "summary_required": ["catalyst_id", "source_file", "output_prefix", "reaction_type", "inlet_flow_source", "bypass_source", "bypass_file", "bypass_omit_initial", "bypass_points_used", "bypass_selected_points", "inlet_Ar_sccm", "inlet_CO2_sccm", "inlet_H2_sccm", "catalyst_mass_mg", "injection_interval_min", "rejected_initial_injections", "rejected_final_injections", "n_bypass", "n_reaction", "n_blank_excluded", "plot_reaction_points", "ss_inj_start", "ss_inj_end", "conversion_%", "carbon_balance_%", "space_velocity_reference_temperature_K", "space_velocity_reference_pressure_atm"],
+  "flows_required": ["catalyst_id", "label", "inj_num", "is_bypass", "source_kind", "H2", "CO2", "Ar", "is_blank", "time_on_stream_h", "analysis_include", "row_status", "conversion"],
+  "flow_species": ["H2", "CO2", "Ar", "CO", "N2", "CH4", "CH4_TCD", "C2H6", "C2H6_TCD", "C2H4", "C2H4_TCD", "C3H8", "C3H6", "MeOH", "EtOH", "DME", "nC4H10", "iC5H12"],
+  "summary_quantities": {
+    "catalyst_mass_mg": {"field": "catalyst_mass", "unit": "g", "factor": "0.001"},
+    "injection_interval_min": {"field": "nominal_injection_interval", "unit": "s", "factor": "60"},
+    "run_duration_h": {"field": "declared_run_duration", "unit": "s", "factor": "3600"},
+    "conversion_%": {"field": "steady_state_conversion", "unit": "1", "factor": "0.01"},
+    "conversion_std_%": {"field": "steady_state_conversion_sample_standard_deviation", "unit": "1", "factor": "0.01"},
+    "carbon_balance_%": {"field": "steady_state_carbon_balance", "unit": "1", "factor": "0.01"},
+    "calculated_ghsv_ml_g_hr": {"field": "feed_volumetric_flow_per_catalyst_mass", "unit": "mL/(g h)", "factor": "1"},
+    "calculated_whsv_hr": {"field": "feed_mass_flow_per_catalyst_mass", "unit": "h^-1", "factor": "1"},
+    "total_inlet_flow_sccm": {"field": "total_inlet_standard_volumetric_flow", "unit": "mL/min", "factor": "1"}
+  },
+  "method_review": {
+    "repository": "https://github.com/The-Porosoff-Group/catalysis-toolkit",
+    "inspected_commit": "28b95977c43ee96bb04b5259a9cd766d84fa1975",
+    "configuration": "modules/reaction_configs/rwgs.yaml",
+    "note": "Identifies the code inspected to define this draft profile, not the software version that produced any uploaded file. Legacy exports do not record their producer commit."
+  }
+}
