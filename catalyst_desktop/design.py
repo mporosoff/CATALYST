@@ -126,9 +126,9 @@ def apply_theme(root):
     style.layout('TNotebook.Tab', [('Catalyst.tab', {'sticky': 'nsew', 'children': [('Notebook.padding', {'sticky': 'nsew', 'children': [('Notebook.label', {'sticky': 'nsew'})]})]})])
     style.configure('TNotebook.Tab', padding=(8, 4), font=(family, 9))
     style.layout('Workspace.TNotebook.Tab', [])
-    style.configure('Vertical.TScrollbar', arrowsize=10, width=10, borderwidth=0, troughcolor=PAPER, background='#BBCBBB', bordercolor=PAPER, lightcolor=PAPER, darkcolor=PAPER)
+    style.configure('Vertical.TScrollbar', arrowsize=10, width=10, gripcount=0, borderwidth=0, troughcolor=PAPER, background='#BBCBBB', bordercolor=PAPER, lightcolor=PAPER, darkcolor=PAPER)
     style.layout('Vertical.TScrollbar', [('Vertical.Scrollbar.trough', {'sticky': 'ns', 'children': [('Vertical.Scrollbar.thumb', {'expand': '1', 'sticky': 'nswe'})]})])
-    style.configure('Horizontal.TScrollbar', arrowsize=10, borderwidth=0, troughcolor=PAPER, background='#BBCBBB', bordercolor=PAPER, lightcolor=PAPER, darkcolor=PAPER)
+    style.configure('Horizontal.TScrollbar', arrowsize=10, gripcount=0, borderwidth=0, troughcolor=PAPER, background='#BBCBBB', bordercolor=PAPER, lightcolor=PAPER, darkcolor=PAPER)
     style.layout('Horizontal.TScrollbar', [('Horizontal.Scrollbar.trough', {'sticky': 'we', 'children': [('Horizontal.Scrollbar.thumb', {'expand': '1', 'sticky': 'nswe'})]})])
     return style
 

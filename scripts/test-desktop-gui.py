@@ -101,6 +101,8 @@ def check_navigation(app):
             if isinstance(button, (ttk.Button, ttk.Menubutton)) and button.winfo_ismapped():
                 assert button.winfo_rootx() + button.winfo_width() <= root.winfo_rootx() + root.winfo_width(), 'Action clipped horizontally'
                 assert button.winfo_rooty() + button.winfo_height() <= app.status_label.winfo_rooty(), 'Action hidden below status bar'
+        if page is app.catalog_tab:
+            assert app.catalog_table.winfo_height() >= 80, 'Catalog rows need visible space below the headings'
     app.tabs.select(app.history_tab)
     root.update()
     assert app.history_table.winfo_height() >= 75, 'Saved-record viewport is too short'

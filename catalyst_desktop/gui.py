@@ -976,9 +976,9 @@ class Application:
         p = footer
         buttons = ttk.Frame(p)
         buttons.pack(fill='x')
-        ttk.Button(buttons, text='Use selected sample / model', command=lambda: self.use_catalog_subject(False)).pack(side='left')
-        ttk.Button(buttons, text='Create a derived sample', command=lambda: self.use_catalog_subject(True)).pack(side='left', padx=8)
-        ttk.Button(p, text='Repeat this synthesis procedure', command=self.repeat_catalog_procedure).pack(anchor='w', pady=7)
+        ttk.Button(buttons, text='Use sample / model', command=lambda: self.use_catalog_subject(False)).pack(side='left')
+        ttk.Button(buttons, text='Create derivative', command=lambda: self.use_catalog_subject(True)).pack(side='left', padx=8)
+        ttk.Button(buttons, text='Repeat synthesis', command=self.repeat_catalog_procedure).pack(side='left')
         self.catalog_status = tk.StringVar(value='Connect first, then refresh. No catalog is cached on disk.')
         ttk.Label(p, textvariable=self.catalog_status, wraplength=550, style='Muted.TLabel').pack(anchor='w', pady=10)
 
