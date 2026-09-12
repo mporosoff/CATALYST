@@ -24,6 +24,8 @@ Paged reads use `totalRecords`/`maxRecords`, not the samples-only `hasNextPage` 
 
 The review manifest explicitly says `prepared`; the completion receipt is a separate record. `history` and `read_review` support read-only access to signed experiments and return no new disk files. Downloaded original bytes are verified before reuse. Checksums establish integrity consistency, not a cryptographic identity signature. With shared tokens, client-entered names cannot supply independently enforced reviewer identity or partner isolation.
 
+`design.py` defines the local visual system: colors, typography, original program-drawn icons, scalable rounded button surfaces, visible focus/disabled states, cards, section navigation, and narrow scrollbars. It adds no runtime dependency, web renderer, remote font, network asset, or AI feature. `gui.py` uses the design for sidebar navigation, file lists, collapsed context/mapping panels, a review empty state, and separate scrollable library views. Minimum-size geometry checks cover sidebar labels, publication actions, and the status bar.
+
 The native Tk GUI uses a single worker thread for parsing/network operations and locks editable controls while an operation runs. The UI never passes Tk calls to the worker thread. It stores no research state in a local database. Unknown-write guards remain in application memory across token reconnect/destination re-verification. Closing an incomplete in-memory review discards that state; restart recovery requires manual remote reconciliation. Cross-process concurrent writes to the same revision cannot be made atomic by the client; duplicate/conflicting remote records stop the workflow for owner review.
 
 ## Tests and builds

@@ -33,6 +33,9 @@ def check_navigation(app):
     app.tabs.select(app.import_tab)
     root.update()
     canvas = app.import_tab.canvas
+    assert app.review_button.instate(['disabled']), 'Review must wait for a file selection'
+    bar = next(w for w in app.import_tab.winfo_children() if isinstance(w, ttk.Scrollbar))
+    assert bar.winfo_width() >= 8, 'Scrollbar thumb must remain visible and draggable'
     assert canvas.yview()[1] < 1, 'Fixture must overflow the form to exercise scrolling'
     combo = next(w for w in descendants(app.import_tab) if isinstance(w, ttk.Combobox) and w.winfo_ismapped())
     entry = next(w for w in descendants(app.import_tab) if isinstance(w, ttk.Entry) and w.winfo_ismapped())
@@ -85,6 +88,30 @@ def check_navigation(app):
     with patch('catalyst_desktop.gui.webbrowser.open') as opened:
         app.open_downloads()
         opened.assert_called_once_with(RELEASES_URL)
+    for page, button in app.navigation_buttons.items():
+        button.invoke()
+        root.update()
+        assert app.tabs.select() == page
+        assert button.cget('style') == 'SelectedNav.TButton'
+        assert button.winfo_width() >= button.winfo_reqwidth(), 'Sidebar label clipped'
+    for page in (app.history_tab, app.catalog_tab):
+        app.tabs.select(page)
+        root.update()
+        for button in descendants(page):
+            if isinstance(button, (ttk.Button, ttk.Menubutton)) and button.winfo_ismapped():
+                assert button.winfo_rootx() + button.winfo_width() <= root.winfo_rootx() + root.winfo_width(), 'Action clipped horizontally'
+                assert button.winfo_rooty() + button.winfo_height() <= app.status_label.winfo_rooty(), 'Action hidden below status bar'
+    app.tabs.select(app.history_tab)
+    root.update()
+    assert app.history_table.winfo_height() >= 75, 'Saved-record viewport is too short'
+    # Both library tables need their own independently scrollable viewport.
+    for table, page in ((app.history_table, app.library_reviews), (app.file_table, app.library_files)):
+        app.library_sections.select(page)
+        for i in range(100): table.insert('', 'end', values=(str(i),))
+        root.update()
+        table.yview_moveto(1)
+        assert table.yview()[0] > 0 and table.yview()[1] == 1
+        table.delete(*table.get_children())
     app.tabs.select(app.import_tab)
     canvas.yview_moveto(0)
     root.geometry('1180x860')
@@ -106,6 +133,7 @@ app.modality.set('synthesis')
 app.rebuild_context()
 app.title.set('Synthetic GUI check')
 app.set_sources([Source.from_bytes('synthetic.csv', b'mass,name\n72,001\n')])
+assert not app.review_button.instate(['disabled'])
 app.generate_identity('batch')
 assert app.context_vars['specimenId'].get().startswith('CAT-UR-SMP-')
 for key, value in physical_context().items():
@@ -127,6 +155,15 @@ with patch('tkinter.messagebox.showerror', side_effect=lambda *a, **kw: errors.a
     assert not app.busy and not errors, str(errors)
     assert app.revision is not None
     assert app.revision.value()['preview']['standardized']['rows'][0]['mass_g'] == '0.072'
+    assert app.review_empty.winfo_manager() == '' and app.review_content.winfo_manager() == 'pack'
+    root.geometry('900x680')
+    root.deiconify()
+    root.update()
+    for button in descendants(app.review_content):
+        if isinstance(button, ttk.Button):
+            assert button.winfo_ismapped(), 'Review action disappeared at the minimum window size'
+            assert button.winfo_rooty() + button.winfo_height() <= app.status_label.winfo_rooty()
+    root.withdraw()
     app.reviewer.set('Synthetic reviewer')
     app.review_note.set('Checked source units and context.')
     app.acknowledge.set(True)
@@ -230,6 +267,10 @@ with patch('tkinter.messagebox.showerror', side_effect=lambda *a, **kw: errors.a
     finish(app)
     assert schema_api.native_posts == 17
     assert 'Native material schema verified' in app.status.get()
+    app.new_submission(ask=False)
+    assert app.review_empty.winfo_manager() == 'pack' and app.review_content.winfo_manager() == ''
+    assert not app.context_section.opened and not app.mapping_section.opened
+    assert app.review_button.instate(['disabled'])
     assert not errors, str(errors)
     app.close()
 print('Native GUI smoke passed: wheel events, compact forms, mapping disclosure, persistent review action, release link, tables, images, approval, lineage, schema review/application, and reconnect guards. No network calls.')
