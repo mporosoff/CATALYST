@@ -4,14 +4,92 @@ from pathlib import Path
 import time
 import tkinter as tk
 import tempfile
+from types import SimpleNamespace
+from tkinter import ttk
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tests'))
-from catalyst_desktop.gui import Application
+from catalyst_desktop.gui import Application, RELEASES_URL
 from catalyst_desktop.model import Source
+from catalyst_desktop.model import COMMON_CONTEXT, MODALITY_CONTEXT
+from catalyst_desktop.traceability import trace_context
 from desktop_fixtures import physical_context
 from test_api_contract import NativeSetupAPI, client_for
+from test_configuration import SchemaAPI
+
+
+def descendants(widget):
+    for child in widget.winfo_children():
+        yield child
+        yield from descendants(child)
+
+
+def check_navigation(app):
+    """Exercise real Tk event bindings, including high-resolution wheels and dynamic fields."""
+    root = app.root
+    root.geometry('900x680')
+    root.deiconify()
+    app.tabs.select(app.import_tab)
+    root.update()
+    canvas = app.import_tab.canvas
+    assert canvas.yview()[1] < 1, 'Fixture must overflow the form to exercise scrolling'
+    combo = next(w for w in descendants(app.import_tab) if isinstance(w, ttk.Combobox) and w.winfo_ismapped())
+    entry = next(w for w in descendants(app.import_tab) if isinstance(w, ttk.Entry) and w.winfo_ismapped())
+    original = combo.get()
+    delta = -2 if root.tk.call('tk', 'windowingsystem') == 'aqua' else -120
+    canvas.yview_moveto(0)
+    for widget in (entry, combo, app.import_tab.body):
+        before = canvas.yview()[0]
+        widget.event_generate('<MouseWheel>', delta=delta)
+        root.update()
+        assert canvas.yview()[0] > before, f'Mouse wheel did not scroll over {widget.winfo_class()}'
+    assert combo.get() == original, 'Mouse wheel changed the chosen lab or modality'
+    canvas.yview_moveto(0)
+    if root.tk.call('tk', 'windowingsystem') != 'aqua':
+        app.import_tab.wheel_remainder = 0
+        for _ in range(4): entry.event_generate('<MouseWheel>', delta=-10)
+        root.update()
+        assert canvas.yview()[0] > 0, 'High-resolution wheel deltas were lost'
+    for _ in range(60): app.import_tab.body.event_generate('<MouseWheel>', delta=-abs(delta) * 10)
+    root.update()
+    assert canvas.yview()[1] == 1, 'Cannot reach bottom of form'
+    review = next(w for w in descendants(app.import_tab) if isinstance(w, ttk.Button) and w.cget('text') == 'Review submission  →')
+    assert review.winfo_ismapped()
+    assert 0 <= review.winfo_rooty() - root.winfo_rooty() < root.winfo_height() - review.winfo_height()
+    assert app.status_label.winfo_ismapped(), 'Connection and transfer status must remain visible'
+    assert app.status_label.winfo_rooty() + app.status_label.winfo_height() <= root.winfo_rooty() + root.winfo_height()
+    for selected in ('computational', 'synthesis', 'reactor'):
+        app.modality.set(selected)
+        app.rebuild_context()
+        expected = COMMON_CONTEXT | trace_context(selected) | MODALITY_CONTEXT[selected]
+        assert set(app.context_vars) == set(expected), 'Grouping omitted scientific context fields'
+        assert all(app._scroll_tag in w.bindtags() for w in descendants(app.context_frame))
+    app.mapping_section.set_open(True)
+    root.update()
+    assert app.mapping_section.body.winfo_ismapped()
+    app.mapping_section.toggle_button.invoke()
+    root.update()
+    assert not app.mapping_section.body.winfo_ismapped()
+    # Native data/text views must retain their own wheel handling.
+    assert app.route_wheel(SimpleNamespace(widget=app.data_table, delta=delta)) is None
+    assert app.route_wheel(SimpleNamespace(widget=app.issue_text, delta=delta)) is None
+    app.tabs.select(app.connection_tab)
+    app.connection_tab.canvas.yview_moveto(0)
+    root.update()
+    # Verify the route selects the scroll container beneath the pointer, not the upload form.
+    before = canvas.yview()
+    app.connection_tab.body.event_generate('<MouseWheel>', delta=delta)
+    root.update()
+    assert canvas.yview() == before
+    with patch('catalyst_desktop.gui.webbrowser.open') as opened:
+        app.open_downloads()
+        opened.assert_called_once_with(RELEASES_URL)
+    app.tabs.select(app.import_tab)
+    canvas.yview_moveto(0)
+    root.geometry('1180x860')
+    root.update()
+    root.withdraw()
 
 def finish(app):
     deadline = time.monotonic() + 20
@@ -23,6 +101,7 @@ def finish(app):
 root = tk.Tk()
 root.withdraw()
 app = Application(root, smoke=True)
+check_navigation(app)
 app.modality.set('synthesis')
 app.rebuild_context()
 app.title.set('Synthetic GUI check')
@@ -140,6 +219,17 @@ with patch('tkinter.messagebox.showerror', side_effect=lambda *a, **kw: errors.a
     app.verify_destination()
     finish(app)
     assert app.publisher.operations['section/synthetic'] == 'unknown'
+    schema_api = SchemaAPI()
+    app.client = client_for(schema_api)
+    app.group_id = 7
+    app.prepare_configuration()
+    finish(app)
+    assert schema_api.native_posts == 0, 'Preparing configuration must not mutate SciSure'
+    apply_schema = next(w for w in descendants(root) if isinstance(w, ttk.Button) and w.cget('text') == 'Apply listed schema additions')
+    apply_schema.invoke()
+    finish(app)
+    assert schema_api.native_posts == 17
+    assert 'Native material schema verified' in app.status.get()
     assert not errors, str(errors)
     app.close()
-print('Native GUI smoke passed: tables, image-only review, approval, lineage, read-only setup inspection, and reconnect recovery guards. No network calls.')
+print('Native GUI smoke passed: wheel events, compact forms, mapping disclosure, persistent review action, release link, tables, images, approval, lineage, schema review/application, and reconnect guards. No network calls.')

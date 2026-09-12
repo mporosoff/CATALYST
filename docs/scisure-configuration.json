@@ -1,0 +1,253 @@
+{
+  "format": "catalyst-scisure-configuration/1",
+  "version": 1,
+  "expected_group_name": "CATALYST",
+  "sample_type": {
+    "name": "CATALYST Material v1",
+    "description": "[CATALYST schema catalyst-scisure-configuration/1] Physical catalyst materials, aliquots and treated specimens. Acquisition data and processing results belong to linked experiments. No default stock mass is assigned.",
+    "quantityRequired": false,
+    "defaultQuantityType": "Mass",
+    "defaultUnit": "MilliGram",
+    "thresholdEnabled": false,
+    "defaultThresholdAction": "Nothing"
+  },
+  "fields": [
+    {
+      "definition": {
+        "key": "catalyst_sample_id",
+        "sampleDataType": "TEXT",
+        "required": true,
+        "notes": "Immutable consortium sample ID; also stored in native altID."
+      },
+      "source": "material.id",
+      "encoding": "text",
+      "constant": null
+    },
+    {
+      "definition": {
+        "key": "catalyst_batch_id",
+        "sampleDataType": "TEXT",
+        "required": true,
+        "notes": "Independent synthesis batch; shared by its aliquots."
+      },
+      "source": "batch.id",
+      "encoding": "text",
+      "constant": null
+    },
+    {
+      "definition": {
+        "key": "origin_lab",
+        "sampleDataType": "COMBO",
+        "required": true,
+        "notes": "Lab that synthesized the original batch.",
+        "optionValues": [
+          "A*STAR",
+          "SLAC",
+          "VA Tech (computational)",
+          "Oxeon (pilot scale)",
+          "Northwestern",
+          "Rochester"
+        ]
+      },
+      "source": "batch.origin_lab",
+      "encoding": "lab_display_name",
+      "constant": null
+    },
+    {
+      "definition": {
+        "key": "sample_created_lab",
+        "sampleDataType": "COMBO",
+        "required": true,
+        "notes": "Lab that created this container/aliquot/treated sample.",
+        "optionValues": [
+          "A*STAR",
+          "SLAC",
+          "VA Tech (computational)",
+          "Oxeon (pilot scale)",
+          "Northwestern",
+          "Rochester"
+        ]
+      },
+      "source": "material.creator_lab",
+      "encoding": "lab_display_name",
+      "constant": null
+    },
+    {
+      "definition": {
+        "key": "origin_batch_label",
+        "sampleDataType": "TEXT",
+        "required": true,
+        "notes": "Origin laboratory batch label; not a unique consortium identifier."
+      },
+      "source": "batch.local_id",
+      "encoding": "text",
+      "constant": null
+    },
+    {
+      "definition": {
+        "key": "material_kind",
+        "sampleDataType": "COMBO",
+        "required": true,
+        "notes": "Batch material, aliquot, or treated material.",
+        "optionValues": [
+          "batch material",
+          "aliquot",
+          "treated material"
+        ]
+      },
+      "source": "material.kind",
+      "encoding": "text",
+      "constant": null
+    },
+    {
+      "definition": {
+        "key": "material_state",
+        "sampleDataType": "TEXTAREA",
+        "required": true,
+        "notes": "State/treatment defining this material identity."
+      },
+      "source": "material.state",
+      "encoding": "text",
+      "constant": null
+    },
+    {
+      "definition": {
+        "key": "parent_catalyst_sample_id",
+        "sampleDataType": "TEXT",
+        "required": false,
+        "notes": "Canonical parent; native parentSampleID must reference its resolved SciSure sample."
+      },
+      "source": "material.parent_sample_id",
+      "encoding": "text",
+      "constant": null
+    },
+    {
+      "definition": {
+        "key": "shared_procedure_id",
+        "sampleDataType": "TEXT",
+        "required": true,
+        "notes": "Consortium shared synthesis procedure identifier."
+      },
+      "source": "batch.procedure.id",
+      "encoding": "text",
+      "constant": null
+    },
+    {
+      "definition": {
+        "key": "shared_procedure_version",
+        "sampleDataType": "TEXT",
+        "required": true,
+        "notes": "Exact procedure version; independent of mapping/software versions."
+      },
+      "source": "batch.procedure.version",
+      "encoding": "text",
+      "constant": null
+    },
+    {
+      "definition": {
+        "key": "shared_procedure_reference",
+        "sampleDataType": "TEXTAREA",
+        "required": true,
+        "notes": "Published native protocol version or exact shared procedure document reference."
+      },
+      "source": "batch.procedure.reference",
+      "encoding": "text",
+      "constant": null
+    },
+    {
+      "definition": {
+        "key": "synthesis_execution_id",
+        "sampleDataType": "TEXT",
+        "required": true,
+        "notes": "The particular laboratory execution that made this batch."
+      },
+      "source": "batch.synthesis_execution.id",
+      "encoding": "text",
+      "constant": null
+    },
+    {
+      "definition": {
+        "key": "synthesis_date_iso",
+        "sampleDataType": "TEXT",
+        "required": true,
+        "notes": "YYYY-MM-DD calendar date. Text deliberately preserves date-only precision without UTC conversion."
+      },
+      "source": "batch.synthesis_execution.performed_at",
+      "encoding": "text",
+      "constant": null
+    },
+    {
+      "definition": {
+        "key": "synthesis_record",
+        "sampleDataType": "TEXTAREA",
+        "required": true,
+        "notes": "Actual synthesis execution/ELN record, not just the shared SOP."
+      },
+      "source": "batch.synthesis_execution.record",
+      "encoding": "text",
+      "constant": null
+    },
+    {
+      "definition": {
+        "key": "synthesis_deviations",
+        "sampleDataType": "TEXTAREA",
+        "required": true,
+        "notes": "Actual deviations, including explicit none."
+      },
+      "source": "batch.synthesis_execution.deviations",
+      "encoding": "text",
+      "constant": null
+    },
+    {
+      "definition": {
+        "key": "catalyst_schema_version",
+        "sampleDataType": "TEXT",
+        "required": true,
+        "notes": "Native material binding schema version."
+      },
+      "source": null,
+      "encoding": "text",
+      "constant": "1"
+    }
+  ],
+  "structure": {
+    "project": "CATALYST",
+    "studies": [
+      "A*STAR",
+      "SLAC",
+      "VA Tech (computational)",
+      "Oxeon (pilot scale)",
+      "Northwestern",
+      "Rochester"
+    ],
+    "study_basis": "Acquisition/executing lab; origin lab is a separate sample field.",
+    "experiment_basis": "One synthesis execution or measurement/calculation acquisition; revisions remain with that work.",
+    "autoCollaborate": true,
+    "approval_policy": "Preserve the existing project/study signing and approval policy.",
+    "protocols": "Shared scientific procedure plus exact published protVersionID; never invent procedure content.",
+    "computational_models": "ELN records and versioned model manifests, not physical inventory Samples."
+  },
+  "links": {
+    "synthesis": {
+      "used": "Resolved reagent/parent Samples when supplied",
+      "generated": "Resulting physical sample"
+    },
+    "measurement": {
+      "used": "Measured physical sample",
+      "generated": "Only a newly identified physical product/derivative"
+    },
+    "computation": {
+      "used": "None by default; physical comparison links are explicit evidence, not consumption",
+      "generated": "No physical Sample"
+    }
+  },
+  "storage": {
+    "originals": "Revision-specific FILE section; preserve bytes and embedded metadata.",
+    "standardized": "Approved versioned review attachment; optional processed exports are separate artifacts.",
+    "provenance": "Keep normalization, scientific processing, validation, approval and publication receipt distinct.",
+    "image_handling": "Original file attachment; optional IMAGE sections may supplement but never replace originals.",
+    "quantity": "Optional inventory balance, entered separately; never infer stock mass from reactor loading.",
+    "native_ids": "Discover from this tenant and record in memory/remote publication receipts; never hard-code example IDs."
+  },
+  "installation_scope": "Creates only the dedicated material sample type and missing metadata fields. Does not create samples, projects, studies, protocols, sign records, or change permissions."
+}

@@ -5,6 +5,8 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
 import queue
+import webbrowser
+import sys
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
@@ -18,20 +20,40 @@ from .traceability import (LAB_CHOICES, MATERIAL_KINDS, MODEL_RELATIONS, PHYSICA
     COMPUTATIONAL_CONTEXT, lab_id, lab_name, new_id, trace_context)
 from .catalog import load_catalog, search_catalog
 from .integration import inspect_setup, setup_summary
+from .configuration import plan_configuration, configuration_summary, configuration_document, SchemaInstaller
+
+RELEASES_URL = 'https://github.com/mporosoff/CATALYST/releases'
 
 
 class ScrollFrame(ttk.Frame):
     def __init__(self, parent):
         super().__init__(parent)
-        canvas = tk.Canvas(self, highlightthickness=0, background='#f6f8fb')
+        canvas = self.canvas = tk.Canvas(self, highlightthickness=0, background='white', yscrollincrement=16)
+        self.wheel_remainder = 0.0
         bar = ttk.Scrollbar(self, orient='vertical', command=canvas.yview)
-        self.body = ttk.Frame(canvas, padding=12)
+        self.body = ttk.Frame(canvas, padding=22)
         window = canvas.create_window((0, 0), window=self.body, anchor='nw')
         canvas.configure(yscrollcommand=bar.set)
         self.body.bind('<Configure>', lambda _: canvas.configure(scrollregion=canvas.bbox('all')))
         canvas.bind('<Configure>', lambda e: canvas.itemconfigure(window, width=e.width))
         canvas.pack(side='left', fill='both', expand=True)
         bar.pack(side='right', fill='y')
+
+
+class Disclosure(ttk.Frame):
+    def __init__(self, parent, title, opened=False):
+        super().__init__(parent)
+        self.title, self.opened = title, opened
+        self.toggle_button = ttk.Button(self, style='Disclosure.TButton', command=lambda: self.set_open(not self.opened))
+        self.toggle_button.pack(fill='x')
+        self.body = ttk.Frame(self, padding=(12, 12, 12, 4))
+        self.set_open(opened)
+
+    def set_open(self, opened):
+        self.opened = bool(opened)
+        self.toggle_button.configure(text=('▾  ' if self.opened else '▸  ') + self.title)
+        if self.opened: self.body.pack(fill='x')
+        else: self.body.pack_forget()
 
 
 class Application:
@@ -47,6 +69,7 @@ class Application:
         self.parent = None
         self.publisher = None
         self.transfer_operations = {}  # Keep uncertain-write guards across reconnects for this app session.
+        self.schema_operations = {}
         self.client = None
         self.destination = None
         self.group_id = None
@@ -59,48 +82,119 @@ class Application:
         self.context_vars = {}
         self.catalog = None
         self.catalog_rows = []
-        self.root.title(f'CATALYST {__version__} — Local review · SciSure storage')
-        self.root.geometry('1160x820')
-        self.root.minsize(850, 620)
+        self.root.title(f'CATALYST · {__version__}')
+        self.root.geometry('1180x860')
+        self.root.minsize(900, 680)
+        self.root.configure(background='#F3F6FA')
         style = ttk.Style(root)
         if 'clam' in style.theme_names():
             style.theme_use('clam')
-        style.configure('.', font=('Segoe UI', 10))
-        style.configure('TFrame', background='#f6f8fb')
-        style.configure('TLabel', background='#f6f8fb', foreground='#183047')
-        style.configure('Heading.TLabel', font=('Segoe UI', 20, 'bold'))
-        style.configure('Sub.TLabel', font=('Segoe UI', 11, 'bold'))
-        style.configure('TButton', padding=(12, 7))
-        style.configure('Treeview', rowheight=26)
-        style.configure('TNotebook.Tab', padding=(18, 9))
+        family = 'Helvetica Neue' if sys.platform == 'darwin' else 'Segoe UI'
+        style.configure('.', font=(family, 10), background='white', foreground='#203244')
+        style.configure('TFrame', background='white')
+        style.configure('TLabel', background='white', foreground='#203244')
+        style.configure('Heading.TLabel', font=(family, 21, 'bold'), foreground='#122B39')
+        style.configure('Sub.TLabel', font=(family, 11, 'bold'))
+        style.configure('Muted.TLabel', foreground='#627486')
+        style.configure('Header.TFrame', background='#122B39')
+        style.configure('Brand.TLabel', background='#122B39', foreground='white', font=(family, 23, 'bold'))
+        style.configure('Header.TLabel', background='#122B39', foreground='#BDD6DB')
+        style.configure('TButton', padding=(14, 9), background='white', bordercolor='#D5DEE7', borderwidth=1, relief='flat')
+        style.map('TButton', background=[('active', '#EEF5F5')])
+        style.configure('Primary.TButton', background='#087F78', foreground='white', bordercolor='#087F78', font=(family, 10, 'bold'))
+        style.map('Primary.TButton', background=[('disabled', '#BAC9CD'), ('active', '#096860')], foreground=[('disabled', '#EEF2F5')])
+        style.configure('Disclosure.TButton', anchor='w', background='#EFF5F7', bordercolor='#DFE8EE', font=(family, 10, 'bold'))
+        style.configure('TEntry', padding=(9, 7), fieldbackground='white', bordercolor='#CFDAE3')
+        style.configure('TCombobox', padding=(8, 7), bordercolor='#CFDAE3', arrowsize=14)
+        style.map('TCombobox', fieldbackground=[('readonly', 'white')], selectbackground=[('readonly', '#E4F1F0')], selectforeground=[('readonly', '#203244')])
+        style.configure('TCheckbutton', padding=(0, 5), background='white')
+        style.configure('Treeview', rowheight=32, fieldbackground='white', bordercolor='#E0E7EE')
+        style.configure('Treeview.Heading', padding=(8, 9), background='#EEF4F7', font=(family, 10, 'bold'))
+        style.map('Treeview', background=[('selected', '#DDEFEA')], foreground=[('selected', '#123F3A')])
+        style.configure('TNotebook', background='#F3F6FA', borderwidth=0)
+        style.configure('TNotebook.Tab', padding=(17, 11), background='#E9EFF4', borderwidth=0)
+        style.map('TNotebook.Tab', background=[('selected', 'white')], foreground=[('selected', '#087F78')])
+        style.layout('Workspace.TNotebook.Tab', [])
+        style.configure('Nav.TButton', background='#F3F6FA', bordercolor='#F3F6FA', padding=(16, 11))
+        style.configure('SelectedNav.TButton', background='#DDEFEA', bordercolor='#DDEFEA', foreground='#075B56', padding=(16, 11), font=(family, 10, 'bold'))
         self.status = tk.StringVar(value='Ready. Files stay on this computer until you choose Send to SciSure.')
-        header = ttk.Frame(root, padding=(20, 16))
+        header = ttk.Frame(root, padding=(24, 19), style='Header.TFrame')
         header.pack(fill='x')
-        ttk.Label(header, text='CATALYST', style='Heading.TLabel').pack(side='left')
-        ttk.Label(header, text='  Catalysis data · Review locally, keep the record in SciSure').pack(side='left', padx=16)
-        self.tabs = ttk.Notebook(root)
-        self.tabs.pack(fill='both', expand=True, padx=16)
+        ttk.Label(header, text='CATALYST', style='Brand.TLabel').pack(side='left')
+        ttk.Label(header, text='Local review · Direct SciSure storage', style='Header.TLabel').pack(side='left', padx=20)
+        ttk.Button(header, text='Get latest version', command=self.open_downloads).pack(side='right')
+        navigation = ttk.Frame(root, style='Navigation.TFrame', padding=(18, 12))
+        style.configure('Navigation.TFrame', background='#F3F6FA')
+        navigation.pack(fill='x')
+        self.tabs = ttk.Notebook(root, style='Workspace.TNotebook')
+        self.tabs.pack(fill='both', expand=True, padx=18)
         self.connection_tab = ScrollFrame(self.tabs)
         self.import_tab = ScrollFrame(self.tabs)
         self.review_tab = ttk.Frame(self.tabs, padding=14)
         self.history_tab = ttk.Frame(self.tabs, padding=14)
         self.catalog_tab = ttk.Frame(self.tabs, padding=14)
-        for frame, label in [(self.import_tab, '1  Files & mapping'), (self.review_tab, '2  Review & approve'),
-                (self.connection_tab, '3  SciSure connection'), (self.history_tab, '4  Read from SciSure'),
-                (self.catalog_tab, '5  Samples & models')]:
+        navigation_buttons = {}
+        for frame, label in [(self.import_tab, 'Upload'), (self.review_tab, 'Review'),
+                (self.connection_tab, 'SciSure connection'), (self.history_tab, 'Saved records'),
+                (self.catalog_tab, 'Samples & models')]:
             self.tabs.add(frame, text=label)
+            button = ttk.Button(navigation, text=label, style='Nav.TButton', command=lambda frame=frame: self.tabs.select(frame))
+            button.pack(side='left', padx=(0, 8))
+            navigation_buttons[str(frame)] = button
+        def highlight_navigation(_=None):
+            for frame, button in navigation_buttons.items():
+                button.configure(style='SelectedNav.TButton' if frame == self.tabs.select() else 'Nav.TButton')
+        self.tabs.bind('<<NotebookTabChanged>>', highlight_navigation)
+        highlight_navigation()
         self.build_connection()
         self.build_import()
         self.build_review()
         self.build_history()
         self.build_catalog()
-        ttk.Label(root, textvariable=self.status, padding=(20, 12), wraplength=1050).pack(fill='x')
+        self._scroll_tag = 'CatalystWheel' + str(id(self))
+        for event in ('<MouseWheel>', '<Button-4>', '<Button-5>'):
+            self.root.bind_class(self._scroll_tag, event, self.route_wheel)
+        self.root.bind_all('<Map>', lambda event: self.install_wheel_handlers(event.widget), add='+')
+        self.install_wheel_handlers()
+        self.status_label = ttk.Label(root, textvariable=self.status, padding=(20, 10), wraplength=840, style='Muted.TLabel')
+        self.status_label.pack(side='bottom', fill='x', before=self.tabs)
         self.root.protocol('WM_DELETE_WINDOW', self.close)
         self.root.report_callback_exception = self.callback_error
         self.root.after(100, self.poll)
 
     def callback_error(self, *_):
         messagebox.showerror('CATALYST', 'This action could not be completed. Your in-memory review is retained.', parent=self.root)
+
+    def install_wheel_handlers(self, widget=None):
+        if not hasattr(self, '_scroll_tag'): return
+        widget = widget or self.root
+        try:
+            tags = widget.bindtags()
+            if self._scroll_tag not in tags: widget.bindtags((self._scroll_tag,) + tags)
+            for child in widget.winfo_children(): self.install_wheel_handlers(child)
+        except (AttributeError, tk.TclError):
+            pass
+
+    def route_wheel(self, event):
+        widget = event.widget
+        # Text, result tables, and open drop-down lists keep their own native scrolling.
+        if isinstance(widget, (tk.Text, tk.Listbox, ttk.Treeview)) or not isinstance(widget, tk.Misc): return
+        parent = widget
+        while parent is not None and not isinstance(parent, ScrollFrame): parent = getattr(parent, 'master', None)
+        if parent is None: return
+        if getattr(event, 'num', None) in (4, 5): movement = -3 if event.num == 4 else 3
+        else:
+            delta = getattr(event, 'delta', 0)
+            movement = -delta if self.root.tk.call('tk', 'windowingsystem') == 'aqua' else -delta / 120 * 3
+        parent.wheel_remainder += movement
+        steps = int(parent.wheel_remainder)
+        parent.wheel_remainder -= steps
+        if steps and parent.canvas.yview() != (0.0, 1.0): parent.canvas.yview_scroll(steps, 'units')
+        return 'break'  # Scrolling over a lab/unit selector must never change its selected value.
+
+    def open_downloads(self):
+        webbrowser.open(RELEASES_URL)
+        self.status.set('Opened the GitHub downloads page. Close CATALYST before replacing its application file; your saved OS credential remains available.')
 
     def invalidate(self, *_):
         self.dirty = True
@@ -195,6 +289,9 @@ class Application:
         self.destination_status = tk.StringVar(value='No destination verified.')
         ttk.Label(p, textvariable=self.destination_status, wraplength=950).pack(anchor='w', pady=10)
         ttk.Label(p, text='Shared tokens use the token account’s permissions and SciSure identity. Reviewer names in CATALYST are self-reported.', wraplength=900).pack(anchor='w', pady=12)
+        advanced = Disclosure(p, 'Administrator tools · SciSure configuration')
+        advanced.pack(fill='x', pady=(12, 0))
+        p = advanced.body
         native_fields = ttk.Frame(p)
         native_fields.pack(fill='x')
         self.inspect_sample = tk.StringVar()
@@ -202,6 +299,43 @@ class Application:
         self.label_entry(native_fields, 0, 'Existing SciSure sample ID (optional check)', self.inspect_sample)
         self.label_entry(native_fields, 1, 'SciSure protocol version ID (optional check)', self.inspect_protocol)
         ttk.Button(p, text='Inspect native SciSure setup (read only)', command=self.inspect_integration).pack(anchor='w', pady=5)
+        ttk.Button(p, text='Prepare CATALYST material configuration', command=self.prepare_configuration).pack(anchor='w', pady=5)
+
+    def prepare_configuration(self):
+        if self.busy or not self.client or self.group_id is None:
+            self.status.set('Connect to the CATALYST group before preparing its material schema.')
+            return
+        client, group = self.client, self.group_id
+        def done(plan):
+            window = tk.Toplevel(self.root)
+            window.title('CATALYST material configuration')
+            window.geometry('1000x740')
+            tabs = ttk.Notebook(window)
+            tabs.pack(fill='both', expand=True, padx=12, pady=12)
+            for label, contents in [('Changes to apply', configuration_summary(plan)),
+                    ('Configuration definition', json.dumps(configuration_document(), ensure_ascii=False, indent=2))]:
+                frame, text = self.text_panel(tabs, height=30)
+                tabs.add(frame, text=label)
+                self.show_text(text, contents)
+            def apply():
+                if self.busy or self.client is not client or self.group_id != group:
+                    self.status.set('Reconnect or wait for the current action, then prepare configuration again.')
+                    return
+                key = (client.origin, group)
+                installer = SchemaInstaller(client, group, self.schema_operations.setdefault(key, {}))
+                def installed(result):
+                    if window.winfo_exists(): window.destroy()
+                    self.status.set(f'Native material schema verified: sample type {result["sample_type_id"]}, {len(result["field_bindings"])} fields. No research samples or permissions were changed.')
+                self.run('Applying the reviewed material schema…', lambda: installer.apply(plan,
+                    lambda message: self.messages.put(('progress', message))), installed)
+            actions = ttk.Frame(window, padding=12)
+            actions.pack(fill='x')
+            button = ttk.Button(actions, text='Apply listed schema additions', command=apply)
+            button.pack(side='left')
+            if plan['ready'] or plan['conflicts']: button.state(['disabled'])
+            ttk.Button(actions, text='Close', command=window.destroy).pack(side='right')
+            self.status.set('Configuration prepared for review. SciSure records have not been changed.')
+        self.run('Discovering the CATALYST material type and field bindings…', lambda: plan_configuration(client, group), done)
 
     def inspect_integration(self):
         if not self.client or self.group_id is None:
@@ -317,38 +451,42 @@ class Application:
 
     def build_import(self):
         p = self.import_tab.body
-        ttk.Label(p, text='Start with the original files', style='Heading.TLabel').pack(anchor='w')
-        ttk.Label(p, text='Tables: CSV, XLSX, flat JSON. Originals: images, PDFs, native instrument files, structures and logs.\nUp to 6 files · 20 MiB each / 40 MiB combined', wraplength=950).pack(anchor='w', pady=7)
+        ttk.Label(p, text='Prepare a submission', style='Heading.TLabel').pack(anchor='w')
+        ttk.Label(p, text='Add your files, identify the sample, then review before sending.\nTables, images and native files · 6 files maximum · 20 MiB each / 40 MiB total', style='Muted.TLabel', wraplength=950).pack(anchor='w', pady=(5, 14))
         actions = ttk.Frame(p)
         actions.pack(fill='x')
-        ttk.Button(actions, text='Select files…', command=self.choose_files).pack(side='left')
-        ttk.Button(actions, text='Add images / supporting files…', command=self.add_supporting_files).pack(side='left', padx=8)
+        ttk.Button(actions, text='Choose files', style='Primary.TButton', command=self.choose_files).pack(side='left')
+        ttk.Button(actions, text='Add images / supporting files', command=self.add_supporting_files).pack(side='left', padx=8)
         ttk.Button(actions, text='New submission', command=self.new_submission).pack(side='left', padx=8)
         self.file_summary = tk.StringVar(value='No files selected.')
-        ttk.Label(p, textvariable=self.file_summary, wraplength=950).pack(anchor='w', pady=8)
+        ttk.Label(p, textvariable=self.file_summary, style='Muted.TLabel', wraplength=950).pack(anchor='w', pady=10)
         form = ttk.Frame(p)
         form.pack(fill='x', pady=8)
         self.title = self.watched()
         self.entity = self.watched('Rochester')
         self.modality = self.watched('reactor')
         self.label_entry(form, 0, 'Submission title', self.title)
-        ttk.Label(form, text='Data format / source lab').grid(row=1, column=0, sticky='w', pady=6)
-        ttk.Combobox(form, textvariable=self.entity, values=LAB_CHOICES, state='readonly').grid(row=1, column=1, sticky='ew')
-        ttk.Label(form, text='Data modality').grid(row=2, column=0, sticky='w', pady=6)
-        combo = ttk.Combobox(form, textvariable=self.modality, values=MODALITIES, state='readonly')
-        combo.grid(row=2, column=1, sticky='ew')
+        selectors = ttk.Frame(p)
+        selectors.pack(fill='x', pady=(0, 8))
+        selectors.columnconfigure(0, weight=1, uniform='selector')
+        selectors.columnconfigure(1, weight=1, uniform='selector')
+        ttk.Label(selectors, text='Source laboratory', style='Muted.TLabel').grid(row=0, column=0, sticky='w', pady=(0, 5))
+        ttk.Combobox(selectors, textvariable=self.entity, values=LAB_CHOICES, state='readonly').grid(row=1, column=0, sticky='ew', padx=(0, 12))
+        ttk.Label(selectors, text='Data type', style='Muted.TLabel').grid(row=0, column=1, sticky='w', pady=(0, 5))
+        combo = ttk.Combobox(selectors, textvariable=self.modality, values=MODALITIES, state='readonly')
+        combo.grid(row=1, column=1, sticky='ew')
         combo.bind('<<ComboboxSelected>>', lambda _: self.rebuild_context())
         self.toolkit = tk.BooleanVar(value=False)
         self.toolkit.trace_add('write', self.invalidate)
-        ttk.Checkbutton(p, text='Import a Rochester toolkit RWGS bundle (original XLSX + analysis XLSX + summary CSV + flows CSV)',
-            variable=self.toolkit).pack(anchor='w', pady=8)
+        ttk.Checkbutton(p, text='Use the Rochester GC toolkit bundle mapping',
+            variable=self.toolkit).pack(anchor='w', pady=2)
         self.raw_only = tk.BooleanVar(value=False)
         self.raw_only.trace_add('write', self.invalidate)
-        ttk.Checkbutton(p, text='Preserve original files with context only — no standardized table or scientific interpretation',
-            variable=self.raw_only).pack(anchor='w', pady=5)
-        ttk.Label(p, text='Scientific context', style='Sub.TLabel').pack(anchor='w', pady=(12, 4))
+        ttk.Checkbutton(p, text='Keep original files with context only (no table conversion)',
+            variable=self.raw_only).pack(anchor='w', pady=2)
+        ttk.Label(p, text='Sample and scientific context', style='Sub.TLabel').pack(anchor='w', pady=(18, 4))
         ttk.Label(p, text='For existing materials, start in Samples & models to reuse the lab, batch, and procedure identity. '
-            'Local labels are kept separately from canonical IDs.', wraplength=950).pack(anchor='w', pady=5)
+            'Use the tabs below to complete the details.', style='Muted.TLabel', wraplength=950).pack(anchor='w', pady=5)
         identity_actions = ttk.Frame(p)
         identity_actions.pack(fill='x', pady=5)
         ttk.Button(identity_actions, text='New batch + sample IDs', command=lambda: self.generate_identity('batch')).pack(side='left')
@@ -357,8 +495,9 @@ class Application:
         self.context_frame = ttk.Frame(p)
         self.context_frame.pack(fill='x')
         self.rebuild_context()
-        ttk.Separator(p).pack(fill='x', pady=15)
-        ttk.Label(p, text='Versioned field mapping', style='Sub.TLabel').pack(anchor='w')
+        self.mapping_section = Disclosure(p, 'Column mapping & versions')
+        self.mapping_section.pack(fill='x', pady=(18, 8))
+        p = self.mapping_section.body
         ttk.Label(p, text='For ordinary tables, choose a header row and explicit units. Toolkit bundles use their dedicated versioned mapping.', wraplength=950).pack(anchor='w', pady=5)
         mapping_form = ttk.Frame(p)
         mapping_form.pack(fill='x')
@@ -381,24 +520,48 @@ class Application:
         ttk.Button(p, text='Read columns', command=self.read_columns).pack(anchor='w', pady=8)
         self.mapping_frame = ttk.Frame(p)
         self.mapping_frame.pack(fill='x')
-        ttk.Button(p, text='Build review preview', command=self.preview).pack(anchor='e', pady=16)
+        footer = ttk.Frame(self.import_tab, padding=(22, 12))
+        footer.pack(side='bottom', fill='x', before=self.import_tab.canvas)
+        ttk.Label(footer, text='Nothing is sent until you review and approve.', style='Muted.TLabel').pack(side='left')
+        ttk.Button(footer, text='Review submission  →', style='Primary.TButton', command=self.preview).pack(side='right')
 
     def rebuild_context(self):
         old = {k: v.get() for k, v in self.context_vars.items()}
         for child in self.context_frame.winfo_children():
             child.destroy()
         self.context_vars = {}
+        self.context_sections = ttk.Notebook(self.context_frame)
+        self.context_sections.pack(fill='x', pady=(10, 0))
+        groups = {}
+        for name in ('Sample & run', 'Measurement', 'Model & links' if self.modality.get() == 'computational' else 'Synthesis & lineage', 'Labs & handoff', 'Notes'):
+            frame = ttk.Frame(self.context_sections, padding=(12, 14))
+            self.context_sections.add(frame, text=name)
+            frame.columnconfigure(0, weight=1, uniform='field')
+            frame.columnconfigure(1, weight=1, uniform='field')
+            groups[name] = [frame, 0]
         labs = {'submittingLab', 'acquisitionLab', 'processingLab', 'originLab', 'sampleCreatedLab', 'modelCreatedLab', 'custodyFromLab'}
         choices = {**{key: LAB_CHOICES for key in labs}, 'materialKind': MATERIAL_KINDS, 'modelRelation': MODEL_RELATIONS}
         for row, (key, label) in enumerate((COMMON_CONTEXT | trace_context(self.modality.get()) | MODALITY_CONTEXT[self.modality.get()]).items()):
             default = self.entity.get() if key in labs - {'custodyFromLab'} else ''
             var = self.watched(old.get(key, default))
             self.context_vars[key] = var
+            if key in ('processingVersion', 'identityNote'): group = 'Notes'
+            elif key in ('submittingLab', 'acquisitionLab', 'processingLab', 'custodyFromLab', 'custodySampleId', 'custodyRecord', 'receivedAt'): group = 'Labs & handoff'
+            elif key in ('methodId', 'methodVersion') or key in MODALITY_CONTEXT[self.modality.get()]: group = 'Measurement'
+            elif key in ('batchId', 'localBatchId', 'originLab', 'sampleCreatedLab', 'materialKind', 'parentSampleId', 'materialState'): group = 'Sample & run'
+            elif key in PHYSICAL_CONTEXT: group = 'Synthesis & lineage'
+            elif key in COMPUTATIONAL_CONTEXT: group = 'Model & links'
+            else: group = 'Sample & run'
+            parent, index = groups[group]
+            field = ttk.Frame(parent, padding=(0, 0, 12, 10))
+            field.grid(row=index // 2, column=index % 2, sticky='nsew')
+            groups[group][1] += 1
+            ttk.Label(field, text=label, wraplength=345, style='Muted.TLabel').pack(anchor='w', pady=(0, 5))
             if key in choices:
-                ttk.Label(self.context_frame, text=label).grid(row=row, column=0, sticky='w', pady=5, padx=(0, 12))
-                ttk.Combobox(self.context_frame, textvariable=var, values=choices[key], state='readonly').grid(row=row, column=1, sticky='ew', pady=5)
+                ttk.Combobox(field, textvariable=var, values=choices[key], state='readonly', width=28).pack(fill='x')
             else:
-                self.label_entry(self.context_frame, row, label, var)
+                ttk.Entry(field, textvariable=var, width=30).pack(fill='x')
+        self.install_wheel_handlers(self.context_frame)
 
     def generate_dataset_id(self):
         self.context_vars['datasetId'].set(new_id(self.context_vars['acquisitionLab'].get(), 'DS'))
@@ -449,8 +612,8 @@ class Application:
 
     def set_sources(self, sources):
         self.sources = sources
-        self.file_summary.set('\n'.join(f'{s.name}  ·  {len(s.content):,} bytes  ·  '
-            f'{"preserved, not parsed" if s.artifact["format"] == "binary" else "table input"}  ·  SHA-256 {s.artifact["sha256"][:12]}…' for s in sources))
+        self.file_summary.set('\n'.join(f'{s.name}  ·  {len(s.content) / 1024:,.1f} KB  ·  '
+            f'{"Original file" if s.artifact["format"] == "binary" else "Table"}' for s in sources) or 'No files selected.')
         self.source_choice.configure(values=[s.name for s in sources])
         if sources:
             self.source_choice.current(next((i for i, s in enumerate(sources) if s.artifact['format'] != 'binary'), 0))
@@ -466,6 +629,7 @@ class Application:
                 self.sheet_choice.set(profile['sheet'])
                 self.read_columns(profile)
         self.invalidate()
+        if self.raw_only.get() or self.toolkit.get(): self.mapping_section.set_open(False)
         self.status.set('Source bytes are in memory. No extra research files were written to disk.')
 
     def add_supporting_files(self):
@@ -514,6 +678,7 @@ class Application:
 
     def read_columns(self, profile=None):
         try:
+            self.mapping_section.set_open(True)
             index = self.source_choice.current()
             if index < 0:
                 raise InputError('Select source files first.')
@@ -542,6 +707,7 @@ class Application:
                 ttk.Entry(self.mapping_frame, textvariable=aliases, width=30).grid(row=row, column=3, sticky='ew', padx=4)
                 self.rules.append((name, target, unit, aliases))
             self.invalidate()
+            self.install_wheel_handlers(self.mapping_frame)
         except (InputError, ValueError):
             messagebox.showerror('CATALYST', 'Choose a valid source worksheet and header row with unique text column names.', parent=self.root)
 
@@ -592,7 +758,8 @@ class Application:
 
     def text_panel(self, parent, height=10):
         frame = ttk.Frame(parent)
-        widget = tk.Text(frame, height=height, wrap='none', font=('Consolas', 10), background='white', foreground='#183047')
+        widget = tk.Text(frame, height=height, wrap='none', font=('Menlo' if sys.platform == 'darwin' else 'Consolas', 10),
+            background='white', foreground='#183047', relief='flat', borderwidth=0, padx=14, pady=12)
         vertical = ttk.Scrollbar(frame, orient='vertical', command=widget.yview)
         horizontal = ttk.Scrollbar(frame, orient='horizontal', command=widget.xview)
         widget.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set, state='disabled')
@@ -643,7 +810,7 @@ class Application:
         ttk.Checkbutton(p, text='I reviewed the exact revision, source mapping, scientific context, and all warnings.', variable=self.acknowledge).pack(anchor='w')
         actions = ttk.Frame(p)
         actions.pack(fill='x', pady=8)
-        ttk.Button(actions, text='Approve this revision', command=self.approve).pack(side='left')
+        ttk.Button(actions, text='Approve this revision', style='Primary.TButton', command=self.approve).pack(side='left')
         ttk.Button(actions, text='Send / check transfer to SciSure', command=self.publish).pack(side='left', padx=8)
         self.approval_status = tk.StringVar(value='Not approved.')
         ttk.Label(p, textvariable=self.approval_status, wraplength=1000).pack(anchor='w')

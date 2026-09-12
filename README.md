@@ -4,7 +4,7 @@ Local desktop upload, review, and standardization workspace for catalysis data, 
 
 ## Desktop application — Windows and Mac
 
-Run `python -m catalyst_desktop` with Python 3.12+ and Tk. Install `requirements-desktop.txt` for optional operating-system credential storage. Packaged native applications are built by the **Desktop application** GitHub workflow, with no token or research data included in build inputs.
+Download the portable Windows EXE or the appropriate Mac DMG from [GitHub Releases](https://github.com/mporosoff/CATALYST/releases). No separate Python installation is needed. To update, close the app and replace its application file. Developers can run `python -m catalyst_desktop` with Python 3.12+ and Tk after installing `requirements-desktop.txt`. Builds contain no token or research data.
 
 The app supports offline CSV/XLSX/JSON table selection, original images and native supporting files, explicit versioned mappings, scientific-context validation, preview, immutable revision approval, direct verified SciSure uploads, saved-review history, and browsing experiment file attachments. Image-only submissions have a dedicated imaging modality and preserve-only review. It uses no hosted processing backend, AI service, Cloudflare service, or local research-data cache. Original files and approved records go directly to SciSure. Optional remembered tokens live in the operating system credential store.
 
@@ -12,8 +12,9 @@ The app supports offline CSV/XLSX/JSON table selection, original images and nati
 - [Six-lab sample lineage and measurement workflow](docs/consortium-workflow.md)
 - [Components, boundaries, tests, and packaging](docs/desktop-development.md)
 - [SciSure integration audit and datatype readiness](docs/scisure-integration-review.md)
+- [Selected SciSure configuration and guarded schema setup](docs/scisure-configuration.md)
 
-Version 0.4 retains the six-lab identity catalog and adds images/native attachments, preserve-only submissions, a read-only native SciSure setup inspector, and API-contract/recovery fixes. XRD, XAFS/XANES, TPR/TPD/TPO, CO uptake, and computational table imports have explicit contextual validation. Native inventory writes and Used/Generated sample links still require tenant configuration and live validation; inspecting a protocol version does not bind it to a submitted review.
+Version 0.5 simplifies the upload interface, groups scientific context into tabs, fixes mouse-wheel scrolling, keeps the review action visible, and replaces nested ZIP downloads with a portable Windows EXE and Mac disk images. It adds a concrete versioned material schema and an additive installer with a review step. XRD, XAFS/XANES, TPR/TPD/TPO, CO uptake, and computational table imports have explicit contextual validation. Native inventory publication and Used/Generated links still need implementation and live validation; schema setup and inspecting a protocol version do not enable those links.
 
 Run `python -m unittest discover -s tests -v` and `python scripts/test-desktop-gui.py` for synthetic component and native-widget checks. The desktop build is sandbox-only. Synthesis/spectroscopy use explicit table mappings; Rochester toolkit results are imported with provenance, not independently recalculated.
 

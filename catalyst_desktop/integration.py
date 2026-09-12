@@ -71,7 +71,7 @@ def inspect_setup(client, group_id, progress=lambda _: None, *, experiment_id=No
                 published=protocol.get('draft') is False and protocol.get('deleted') is False,
                 signing_status=protocol.get('signingStatus'))
     report['required_next_steps'] = [
-        'Choose the native physical-material sample type and explicitly bind canonical fields to its sampleTypeMetaIDs.',
+        'Prepare the selected CATALYST Material v1 configuration to discover and verify its native sampleTypeMetaID bindings.',
         'Supply every required field and quantity; SciSure sample creation does not guarantee creation of required metadata.',
         'Resolve shared procedures to published protVersionIDs, then test native Used/Generated sample links.',
         'Verify experiment collaboration and group/subgroup roles for all six labs using their intended accounts.',
