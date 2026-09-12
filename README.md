@@ -1,48 +1,25 @@
 # CATALYST
 
-An upload, review, and standardization application for catalysis data contributed and processed by six entities, with secure publication to SciSure/eLabNext.
+Private upload, review, and standardization workspace for catalysis data, with a secure SciSure/eLabNext sandbox connector.
 
-## Project status
+The web application now supports CSV/XLSX/flat-record JSON upload, immutable original files, source checksums, versioned partner/modality mappings, deterministic unit and exact-name normalization, scientific-context validation, revision history, explicit approval, and recoverable publication to verified SciSure experiment file sections. The original Python offline importer remains available.
 
-The offline ingestion component preserves source bytes, reads CSV/XLSX/flat-record JSON, and produces source-located review previews. It supports two draft Rochester XLSX profiles and a complete Rochester RWGS result bundle from the Porosoff Group catalysis toolkit. Bundle import retains numerical CSV results, verifies embedded raw values and row links, and keeps processing revisions separate. No SciSure credentials or research datasets are stored here, and no SciSure records have been created.
+The first specialized format is the University of Rochester catalysis toolkit RWGS bundle. It preserves partner processing results and creates a separately recorded time-axis revision when a confirmed interval is supplied. It does not independently reproduce GC conversion or selectivity. General synthesis and spectroscopy tables use explicit mappings; technique-specific processing recipes and native sample creation/linking remain future extensions.
 
-The upload/review web application, authenticated backend, approval workflow, scientific processing recipes, and SciSure publication adapter are not implemented or deployed yet. This component is a processing-service building block, not a production web service.
+The browser and backend are deployed together on Sites. The backend uses Cloudflare Workers, private D1 metadata, and private R2 files. The SciSure token is a backend deployment secret. The current tenant allowlist is `https://sandbox.elabjournal.com`. Live connection verification depends on securely installing the user's token and confirming the sandbox destination.
 
-Confirmed MVP modalities:
+## Use and development
 
-- Reactor data
-- Catalyst synthesis
-- Spectroscopy data (specific techniques and export formats to be identified from examples)
+- [Web workflow, security, recovery, testing, and deployment](docs/web-application.md)
+- [Setup and remaining partner inputs](docs/setup.md)
+- [Offline importer](docs/ingestion.md)
+- [Rochester GC integration](docs/toolkit-gc.md)
+- [Scientific object mapping and future extensions](docs/scisure-destinations.md)
 
-Initial data: University of Rochester packed-bed reactor GC export plus a reprocessed workbook, confirmed by the user to be the same run with superseded row labels. Additional entities and synthesis/spectroscopy examples remain outstanding. The initial SciSure environment is `https://sandbox.elabjournal.com`; an unauthenticated request returned HTTP 401. Group access and destination IDs are not yet verified.
+With Node 24: `npm ci --ignore-scripts`, `npm run typecheck`, `npm run test:web`, and `npm run build`. Apply the generated D1 migrations locally before running `npm run dev`. The local HTTP fixture is `node tests/web-workflow.mjs`. The offline suite is `python -m unittest discover -s tests -v`.
 
-## Intended workflow
+## Secrets and research data
 
-1. Select the contributing entity, modality, and source format/version.
-2. Upload CSV, XLSX, or JSON and preserve the original bytes and provenance.
-3. Parse source content without changing its scientific meaning.
-4. Apply a versioned mapping profile keyed by entity + modality + source format/version.
-5. Normalize approved names and units deterministically.
-6. Validate required scientific context and display errors and ambiguous meanings.
-7. Preview the standardized revision alongside its original values and transformations.
-8. Record explicit approval of an immutable revision.
-9. Publish approved records/files through a secure backend to the selected SciSure objects.
-10. Record returned SciSure IDs, operation outcomes, and publication status.
+Do not paste tokens into chat, commit credentials or real research datasets, expose the token in a frontend environment variable, or store it in browser storage. Production secrets are managed through Sites runtime settings. The connection screen reports only whether the token is configured.
 
-Normalization, scientific processing, validation, review, and publication will have separate provenance. Imported partner results must not be labeled as independently reproduced.
-
-## Architecture
-
-GitHub holds source code, schemas, versioned mappings, tests, and deployment configuration. A static frontend calls an authenticated backend; the backend handles scientific validation, durable artifact storage, revision records, and the SciSure adapter. SciSure credentials remain in the backend deployment's secret store.
-
-Research data belongs in private application storage. App authorization must enforce entity and dataset access on every operation; possession of a backend SciSure credential does not give every app user access to all records visible to that credential.
-
-- [Setup and remaining inputs](docs/setup.md)
-- [Implementation requirements and acceptance checks](docs/implementation.md)
-- [Run the offline importer](docs/ingestion.md)
-- [Catalysis toolkit GC integration](docs/toolkit-gc.md)
-- [Proposed SciSure object mapping](docs/scisure-destinations.md)
-
-## Secrets
-
-Store `SCISURE_API_TOKEN` using the backend deployment platform's secret mechanism. Do not paste it into chat, commit it, place it in frontend settings, or expose it through browser requests or logs. `.env.example` documents the development sandbox with empty token/group fields; it is not a working connection.
+Additional entities and representative synthesis/spectroscopy examples are still needed to validate their specific conventions. New partners can be registered by the owner without inventing names or inferring scientific mappings.

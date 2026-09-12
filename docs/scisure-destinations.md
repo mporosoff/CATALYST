@@ -1,6 +1,8 @@
 # Proposed SciSure destinations for reactor data
 
-This is a proposed scientific mapping based on the first Rochester packed-bed reactor examples. It is not a discovered tenant schema or authorization to create records. Sample types, projects, studies, section templates, permissions, and IDs remain to be inspected after secure authentication.
+**Current implementation:** the connector publishes original files and an approved JSON/provenance package to dedicated sections of a verified existing experiment. It can create the suggested sandbox project/study/experiment. Physical sample creation and native Used/Generated links remain extensions requiring tenant schema validation.
+
+The table below is a proposed scientific mapping based on the first Rochester packed-bed reactor examples. It is not a discovered tenant schema or authorization to create records. Sample types, projects, studies, section templates, permissions, and IDs remain to be inspected after secure authentication.
 
 | Scientific concept | Proposed SciSure object | CATALYST responsibility |
 | --- | --- | --- |

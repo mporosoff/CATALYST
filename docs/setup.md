@@ -4,8 +4,8 @@
 
 - Private source repository: https://github.com/mporosoff/CATALYST
 - Initial modalities: reactor data, catalyst synthesis, and spectroscopy.
-- Destination objects: propose after inspecting representative data and the SciSure tenant.
-- Deployment platform: not selected or provisioned.
+- Initial destination: approved records and source files in revision-specific experiment file sections; choose or create a verified sandbox test experiment.
+- Deployment: owner-private Sites application with a Cloudflare Worker backend, D1 metadata, and R2 file storage. See [the web application guide](web-application.md).
 - Initial environment: `https://sandbox.elabjournal.com`, confirmed by the user after login. A credential-free GET to `/api/v1/addons/licenses` returned 401 on September 11, 2026. This establishes a reachable protected endpoint, not permission to a group or access to its records.
 - Initial examples: raw and reprocessed packed-bed reactor GC workbooks from University of Rochester. The user confirmed they represent the same run and that original row labels were wrong. Originals and extracted research values are excluded from GitHub.
 
@@ -35,14 +35,14 @@ These examples will determine the canonical extensions, source mapping profiles,
 
 ## Configure the API secret
 
-Once the backend deployment project exists:
+The backend project is registered. Configure it as follows:
 
 1. In SciSure, open **Apps & Connections → Manage Authentication** to generate an API token if needed.
 2. In the backend deployment platform, open its environment/secrets settings and add `SCISURE_API_TOKEN` as a secret.
 3. Configure the verified base URL and allowed test group separately.
 4. Confirm read access before enabling controlled publication tests.
 
-Do not put the token in chat, GitHub source, a frontend build variable, browser storage, or a public configuration file. The deployment platform and exact secret-entry screen are still to be selected.
+Do not put the token in chat, GitHub source, a frontend build variable, browser storage, or a public configuration file. The local masked token-entry helper transfers the value into Sites runtime secrets without a plaintext token file. Apply a deployment after changing runtime secrets. The website itself does not accept or display tokens.
 
 Source: [REST API overview](https://developer.elabnext.com/docs/overview), reviewed September 11, 2026.
 
