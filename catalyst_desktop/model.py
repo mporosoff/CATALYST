@@ -14,11 +14,12 @@ import uuid
 from catalyst_ingest.readers import InputError, read_artifact, coordinate_parts
 from catalyst_ingest.toolkit import preview_toolkit_bundle
 from . import __version__
+from .traceability import lab_id, build_traceability, attach_subject
 
 MAX_FILE = 20 * 1024 * 1024
 MAX_TOTAL = 40 * 1024 * 1024
 MAX_CELLS = 200_000
-MODALITIES = ('reactor', 'synthesis', 'spectroscopy')
+MODALITIES = ('reactor', 'synthesis', 'spectroscopy', 'XRD', 'XAFS/XANES', 'TPR', 'TPD', 'TPO', 'CO uptake', 'computational')
 FIELDS = {
     'specimen_id': ('text', ('text',)), 'species': ('text', ('text',)),
     'time_s': ('number', ('s', 'min', 'h')),
@@ -33,15 +34,25 @@ FIELDS = {
     'wavelength_nm': ('number', ('nm', 'um')), 'energy_eV': ('number', ('eV', 'keV')),
     'signal': ('number', ('as recorded',)),
     'precursor_name': ('text', ('text',)), 'support_name': ('text', ('text',)),
+    'two_theta_deg': ('number', ('degree (2theta)',)),
+    'scattering_q_A_inverse': ('number', ('1/angstrom (q)',)),
+    'photoelectron_k_A_inverse': ('number', ('1/angstrom (k)',)),
+    'radial_distance_A': ('number', ('angstrom',)),
+    'uptake_mol_g': ('number', ('mol/g', 'mmol/g', 'umol/g')),
+    'model_id': ('text', ('text',)), 'configuration_id': ('text', ('text',)),
+    'computed_energy_eV': ('number', ('eV per configuration',)),
+    'computed_quantity': ('text', ('text',)), 'computed_value': ('number', ('as recorded',)),
+    'computed_unit': ('text', ('text',)),
 }
 CONVERSIONS = {u: ('1', '0') for _, units in FIELDS.values() for u in units}
 CONVERSIONS.update({'min': ('60', '0'), 'h': ('3600', '0'), 'degC': ('1', '273.15'),
     'kPa absolute': ('1000', '0'), 'bar absolute': ('100000', '0'),
     'atm absolute': ('101325', '0'), 'mg': ('0.001', '0'), 'kg': ('1000', '0'),
-    'L/min': ('1000', '0'), '%': ('0.01', '0'), 'um': ('1000', '0'), 'keV': ('1000', '0')})
+    'L/min': ('1000', '0'), '%': ('0.01', '0'), 'um': ('1000', '0'), 'keV': ('1000', '0'),
+    'mmol/g': ('0.001', '0'), 'umol/g': ('0.000001', '0')})
 COMMON_CONTEXT = {
-    'specimenId': 'Specimen identifier', 'runId': 'Run / dataset identifier',
-    'acquiredBy': 'Acquiring laboratory / person', 'acquiredAt': 'Acquisition date (YYYY-MM-DD)',
+    'specimenId': 'Canonical sample / model ID', 'runId': 'Local run / calculation label',
+    'acquiredBy': 'Person who acquired / calculated the data', 'acquiredAt': 'Acquisition date (YYYY-MM-DD)',
     'processingVersion': 'Processing method / version evidence',
     'identityNote': 'Identity corrections / source-label notes',
 }
@@ -49,11 +60,27 @@ MODALITY_CONTEXT = {
     'reactor': {'reactorType': 'Reactor configuration', 'temperatureC': 'Temperature (°C)',
         'pressureKpaAbs': 'Absolute pressure (kPa)', 'catalystMassMg': 'Catalyst mass (mg)',
         'intervalMin': 'Injection interval (min)', 'flowBasis': 'Flow reference conditions / composition basis',
-        'calibration': 'Calibration record / version'},
-    'synthesis': {'synthesisMethod': 'Synthesis method / protocol'},
+        'calibration': 'Calibration record / version', 'scale': 'Scale (laboratory / pilot / other)'},
+    'synthesis': {'synthesisMethod': 'Synthesis method / protocol', 'scale': 'Scale (laboratory / pilot / other)'},
     'spectroscopy': {'technique': 'Spectroscopy technique', 'axisUnit': 'Independent-axis unit',
         'signalUnit': 'Measured signal unit', 'calibration': 'Calibration record / version'},
+    'XRD': {'axisUnit': 'Independent-axis source unit', 'signalUnit': 'Intensity unit / normalization basis',
+        'radiation': 'Radiation source / wavelength', 'geometry': 'Measurement geometry', 'calibration': 'Calibration record / version'},
+    'XAFS/XANES': {'axisUnit': 'Independent-axis source unit', 'signalUnit': 'Signal unit / normalization basis',
+        'absorberEdge': 'Absorbing element and edge', 'detectionMode': 'Detection mode',
+        'energyReference': 'Energy reference / alignment', 'calibration': 'Calibration record / version'},
+    'CO uptake': {'pretreatment': 'Pretreatment record', 'adsorptionTemperature': 'Adsorption temperature and unit',
+        'uptakeBasis': 'Uptake basis (mass, gas reference conditions)', 'stoichiometry': 'CO:site assumption (or not calculated)',
+        'calibration': 'Calibration record / version'},
+    'computational': {'softwareVersion': 'Calculation program and version', 'calculationMethod': 'Calculation method / theory level',
+        'inputStructure': 'Input structure / geometry reference', 'parameters': 'Parameters / configuration reference',
+        'environment': 'Environment / dependency record', 'convergence': 'Convergence / completion evidence',
+        'quantityBasis': 'Computed quantity, unit, and reference basis'},
 }
+for _technique in ('TPR', 'TPD', 'TPO'):
+    MODALITY_CONTEXT[_technique] = {'pretreatment': 'Pretreatment record', 'gasComposition': 'Gas composition / carrier',
+        'rampProgram': 'Temperature / time program', 'flowBasis': 'Flow and reference conditions',
+        'catalystMassMg': 'Sample mass (mg)', 'signalUnit': 'Detector signal unit / basis', 'calibration': 'Calibration record / version'}
 
 def now():
     return datetime.now(timezone.utc).isoformat()
@@ -162,6 +189,7 @@ def table(source, sheet_name, header_row=1):
     return list(headers.values()), result
 
 def make_profile(entity, modality, source_format, source_version, name, version, sheet, header_row, rules):
+    entity = lab_id(entity)
     if modality not in MODALITIES or not all(isinstance(v, str) and v.strip() and len(v) <= 200
             for v in (entity, source_version, name, sheet)):
         raise InputError('Partner, modality, source version, profile name, and worksheet are required.')
@@ -214,13 +242,16 @@ def context_issues(context, modality, toolkit=False):
 
 def build_preview(sources, entity, modality, context, profile=None, source_index=0, toolkit=False):
     check_sources(sources)
+    entity = lab_id(entity)
     if not entity.strip() or modality not in MODALITIES:
         raise InputError('Choose a partner and supported modality.')
     if not isinstance(context, dict) or any(not isinstance(v, str) or len(v) > 4000 for v in context.values()):
         raise InputError('Context values must be text, at most 4,000 characters each.')
     context = {k: v.strip() for k, v in context.items()}
     issues = context_issues(context, modality, toolkit)
-    preview = dict(schema_version='catalyst-desktop-review/1', software_version=__version__,
+    traceability, trace_issues = build_traceability(entity, modality, context)
+    issues.extend(trace_issues)
+    preview = dict(schema_version='catalyst-desktop-review/2', software_version=__version__, traceability=traceability,
         entity=entity.strip(), modality=modality, context=context, artifacts=[s.metadata() for s in sources],
         normalization={}, scientific_processing={'executed': False}, validation={'version': 'desktop/1', 'issues': issues},
         standardized={'columns': [], 'rows': []})
@@ -270,13 +301,13 @@ def build_preview(sources, entity, modality, context, profile=None, source_index
                 except InputError: different = True
                 if different:
                     issues.append(issue('CONTEXT_SOURCE_CONFLICT', f'{key} differs from the partner processing setting. Resolve or reprocess the source.'))
-        return preview
+        return attach_subject(preview)
     if not profile:
         issues.append(issue('MAPPING_REQUIRED', 'Create or load an explicit versioned mapping.'))
         return preview
     source = sources[source_index]
     validated = make_profile(**{k: profile[k] for k in ('entity', 'modality', 'source_format', 'source_version', 'name', 'version', 'sheet', 'header_row', 'rules')})
-    if (profile['entity'], profile['modality'], profile['source_format']) != (entity, modality, source.artifact['format']):
+    if (lab_id(profile['entity']), profile['modality'], profile['source_format']) != (entity, modality, source.artifact['format']):
         raise InputError('This mapping belongs to a different partner, modality, or format.')
     headers, records = table(source, profile['sheet'], profile['header_row'])
     if any(r['source'] not in headers for r in profile['rules']):
@@ -314,12 +345,21 @@ def build_preview(sources, entity, modality, context, profile=None, source_index
                     issues.append(issue('VALUE_INVALID', f'{rule["source"]}, row {source_row}: {e}', location=address))
         out.append(row)
     targets = [r['target'] for r in profile['rules']]
-    if modality == 'spectroscopy':
-        if not any(t in targets for t in ('wavenumber_cm_inverse', 'wavelength_nm', 'energy_eV')) or 'signal' not in targets:
-            issues.append(issue('SPECTRAL_MAPPING', 'Spectroscopy requires a spectral axis and signal mapping.'))
-        axis_rules = [r for r in profile['rules'] if r['target'] in ('wavenumber_cm_inverse', 'wavelength_nm', 'energy_eV')]
+    axes = {'spectroscopy': ('wavenumber_cm_inverse', 'wavelength_nm', 'energy_eV'),
+        'XRD': ('two_theta_deg', 'scattering_q_A_inverse'),
+        'XAFS/XANES': ('energy_eV', 'photoelectron_k_A_inverse', 'radial_distance_A'),
+        **{t: ('temperature_K', 'time_s') for t in ('TPR', 'TPD', 'TPO')}}
+    if modality in axes:
+        if not any(t in targets for t in axes[modality]) or 'signal' not in targets:
+            issues.append(issue('SPECTRAL_MAPPING', modality + ' requires a supported independent axis and signal mapping.'))
+        axis_rules = [r for r in profile['rules'] if r['target'] in axes[modality]]
         if axis_rules and context.get('axisUnit') and any(r['unit'] != context['axisUnit'] for r in axis_rules):
             issues.append(issue('AXIS_UNIT_CONFLICT', 'The context axis unit must match the source unit selected in the mapping.'))
+    if modality == 'CO uptake' and 'uptake_mol_g' not in targets:
+        issues.append(issue('UPTAKE_MAPPING', 'Map mass-normalized CO uptake with an explicit mol/g, mmol/g, or umol/g source unit.'))
+    if modality == 'computational' and not ('computed_energy_eV' in targets or
+            {'computed_quantity', 'computed_value', 'computed_unit'}.issubset(targets)):
+        issues.append(issue('COMPUTATION_MAPPING', 'Map energy per configuration, or a computed quantity, value, and unit. The reference basis must be explicit.'))
     if not out:
         issues.append(issue('NO_RESULTS', 'No standardized data rows were found.'))
     if len(sources) > 1:
@@ -327,7 +367,7 @@ def build_preview(sources, entity, modality, context, profile=None, source_index
     preview['normalization'] = dict(profile=validated, profile_sha256=digest(encode(validated)),
         source_artifact_sha256=source.artifact['sha256'], method='explicit-units-and-exact-aliases/1')
     preview['standardized'] = dict(columns=targets, rows=out)
-    return preview
+    return attach_subject(preview)
 
 @dataclass(frozen=True)
 class Revision:

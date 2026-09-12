@@ -76,21 +76,24 @@ class Publisher:
 
     def publish(self, revision, approval, sources, progress=lambda _: None):
         payload = validate_approval(revision, approval)
+        trace = payload['preview'].get('traceability')
+        if not trace:
+            raise InputError('This older review has no consortium identities. Create and approve a review with lab and sample lineage before publishing.')
         check_sources(sources)
         expected = [(a['filename'], a['sha256'], a['size_bytes']) for a in payload['preview']['artifacts']]
         actual = [(s.name, digest(s.content), len(s.content)) for s in sources]
         if expected != actual:
             raise InputError('The selected source files no longer match the approved revision.')
         self.client.verify_destination(self.destination)
-        # Detect accidental reuse of a profile version with different rules in this destination.
+        from .catalog import load_catalog, check_publication
+        progress('Checking sample, procedure, and dataset identities across the active SciSure group…')
+        catalog = load_catalog(self.client, self.destination['group_id'], progress)
+        check_publication(trace, catalog)
+        # Detect accidental reuse of a profile version with different rules anywhere in the active group.
         profile = payload['preview']['normalization'].get('profile', {})
         if profile.get('format') == 'catalyst-mapping/1':
             key = ('entity', 'modality', 'source_format', 'source_version', 'name', 'version')
-            for item in history(self.client, self.destination):
-                if not item['manifest_id']:
-                    continue
-                other = read_review(self.client, self.destination, item['section_id'], with_sources=False)['revision'].value()
-                other_profile = other['preview']['normalization'].get('profile', {})
+            for other_profile in catalog['profiles']:
                 if all(other_profile.get(k) == profile.get(k) for k in key) and digest(encode(other_profile)) != digest(encode(profile)):
                     raise InputError('This mapping version already has different rules in SciSure. Increase the profile version.')
         packet = dict(format='catalyst-desktop-transfer/1', state='prepared',

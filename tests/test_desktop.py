@@ -12,15 +12,15 @@ from catalyst_desktop.publication import Publisher, history, read_review
 from catalyst_desktop.credentials import save_token, load_token, forget_token, CredentialError
 from test_ingestion import workbook
 from test_toolkit_bundle import fixture
+from desktop_fixtures import physical_context
 
 
 def review(source=None, modality='synthesis', context=None, rules=None, version=1):
     source = source or Source.from_bytes('synthetic.csv', b'mass,name\n72,001\n')
-    context = context or {'specimenId': '001', 'runId': 'SYNTHETIC-1', 'acquiredBy': 'Test laboratory',
-        'acquiredAt': '2026-09-12', 'synthesisMethod': 'Synthetic protocol'}
+    context = context or physical_context()
     rules = rules or [dict(source='mass', target='mass_g', unit='mg'), dict(source='name', target='specimen_id', unit='text')]
-    profile = make_profile('synthetic-partner', modality, source.artifact['format'], 'export v1', 'Example', version, 'Table', 1, rules)
-    preview = build_preview([source], 'synthetic-partner', modality, context, profile)
+    profile = make_profile('Rochester', modality, source.artifact['format'], 'export v1', 'Example', version, 'Table', 1, rules)
+    preview = build_preview([source], 'Rochester', modality, context, profile)
     revision = Revision.create(preview, 'Synthetic test')
     return source, profile, revision
 
@@ -44,9 +44,9 @@ class ModelTests(unittest.TestCase):
 
     def test_xlsx_lexical_precision_and_header_row(self):
         source = Source.from_bytes('synthetic.xlsx', workbook({'Data': {'A3': 'mass', 'B3': 'name', 'A4': 72, 'B4': '001'}}))
-        profile = make_profile('synthetic-partner', 'synthesis', 'xlsx', 'v1', 'Header at 3', 1, 'Data', 3,
+        profile = make_profile('Rochester', 'synthesis', 'xlsx', 'v1', 'Header at 3', 1, 'Data', 3,
             [dict(source='mass', target='mass_g', unit='mg')])
-        preview = build_preview([source], 'synthetic-partner', 'synthesis', {'specimenId':'S','runId':'R','acquiredBy':'Lab','synthesisMethod':'Protocol'}, profile)
+        preview = build_preview([source], 'Rochester', 'synthesis', physical_context(), profile)
         self.assertEqual(preview['standardized']['rows'][0]['mass_g'], '0.072')
         self.assertEqual(preview['standardized']['rows'][0]['source_row'], 4)
 
@@ -70,12 +70,12 @@ class ModelTests(unittest.TestCase):
         with self.assertRaises(InputError): build_preview([source], 'another-partner', 'synthesis', {}, profile)
         for rules in ([dict(source='mass',target='pressure_Pa_abs',unit='bar gauge')],
             [dict(source='mass',target='mass_g',unit='mg'),dict(source='name',target='mass_g',unit='mg')]):
-            with self.assertRaises(InputError): make_profile('lab','synthesis','csv','v1','test',1,'Table',1,rules)
+            with self.assertRaises(InputError): make_profile('Rochester','synthesis','csv','v1','test',1,'Table',1,rules)
 
     def test_context_is_required_and_physical_ranges_checked(self):
         source, profile, _ = review()
         profile['modality'] = 'reactor'
-        preview = build_preview([source], 'synthetic-partner','reactor',{'temperatureC':'-274','pressureKpaAbs':'-1'},profile)
+        preview = build_preview([source], 'Rochester','reactor',{'temperatureC':'-274','pressureKpaAbs':'-1'},profile)
         codes = {i['code'] for i in preview['validation']['issues']}
         self.assertIn('CONTEXT_specimenId',codes)
         self.assertIn('CONTEXT_INVALID_temperatureC',codes)
@@ -91,7 +91,7 @@ class ModelTests(unittest.TestCase):
         _, _, revision = review()
         value = revision.value()
         value['preview']['context']['specimenId'] = 'tampered'
-        self.assertEqual(revision.value()['preview']['context']['specimenId'], '001')
+        self.assertEqual(revision.value()['preview']['context']['specimenId'], physical_context()['specimenId'])
         with self.assertRaises(InputError): revision.approve('Tester','note',False)
         with self.assertRaises(InputError): revision.approve('','note',True)
         self.assertEqual(revision.approve('Tester','Reviewed',True)['revision_sha256'],revision.sha256)

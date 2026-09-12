@@ -9,7 +9,10 @@ Run `python -m catalyst_desktop` with Python 3.12+ and Tk. Install `requirements
 The app supports offline CSV/XLSX/JSON selection, explicit versioned mappings, scientific-context validation, preview, immutable revision approval, direct verified SciSure uploads, saved-review history, and browsing existing experiment files. It uses no hosted processing backend, AI service, Cloudflare service, or local research-data cache. Original files and approved records go directly to SciSure. Optional remembered tokens live in the operating system credential store.
 
 - [Desktop quick start](docs/desktop-quickstart.md)
+- [Six-lab sample lineage and measurement workflow](docs/consortium-workflow.md)
 - [Components, boundaries, tests, and packaging](docs/desktop-development.md)
+
+Version 0.3 adds the A*STAR, SLAC, VA Tech, Oxeon, Northwestern, and Rochester registry; separate procedure, synthesis execution, batch, sample, dataset, and model identities; cross-lab handoff evidence; and a SciSure-backed sample/model catalog. XRD, XAFS/XANES, TPR/TPD/TPO, CO uptake, and computational table imports have explicit contextual validation. Native SciSure inventory sample creation and protocol verification remain pending tenant setup.
 
 Run `python -m unittest discover -s tests -v` and `python scripts/test-desktop-gui.py` for synthetic component and native-widget checks. The desktop build is sandbox-only. Synthesis/spectroscopy use explicit table mappings; Rochester toolkit results are imported with provenance, not independently recalculated.
 

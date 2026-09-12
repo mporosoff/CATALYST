@@ -1,6 +1,6 @@
 # Proposed SciSure destinations for reactor data
 
-**Current implementation:** the connector publishes original files and an approved JSON/provenance package to dedicated sections of a verified existing experiment. It can create the suggested sandbox project/study/experiment. Physical sample creation and native Used/Generated links remain extensions requiring tenant schema validation.
+**Current desktop implementation:** the connector publishes original files and an approved JSON/provenance package to dedicated sections of a verified existing experiment. Version 0.3 records lab-specific batches, physical sample lineage, shared procedure references, dataset identities, and computational model relationships in those packages; see the [consortium workflow](consortium-workflow.md). Its shared catalog reads packages across the active group. The desktop app selects existing experiments. Physical sample creation, protocol-reference verification, and native Used/Generated links remain extensions requiring tenant schema validation.
 
 The table below is a proposed scientific mapping based on the first Rochester packed-bed reactor examples. It is not a discovered tenant schema or authorization to create records. Sample types, projects, studies, section templates, permissions, and IDs remain to be inspected after secure authentication.
 

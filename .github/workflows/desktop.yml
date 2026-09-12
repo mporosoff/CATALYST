@@ -6,10 +6,11 @@ on:
       - 'catalyst_desktop/**'
       - 'catalyst_ingest/**'
       - 'mappings/**'
-      - 'tests/test_desktop.py'
+      - 'tests/**'
       - 'scripts/*desktop*'
       - 'requirements-desktop*.txt'
       - 'docs/desktop*.md'
+      - 'docs/consortium-workflow.md'
       - '.github/workflows/desktop.yml'
   workflow_dispatch:
 permissions:

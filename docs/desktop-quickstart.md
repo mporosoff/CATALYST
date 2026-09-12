@@ -8,12 +8,14 @@ Windows: extract the complete ZIP and open `CATALYST/CATALYST.exe`. Keep the acc
 
 ## Prepare a submission offline
 
-1. In **Files & mapping**, select CSV, XLSX, or JSON files. Enter the partner identifier and choose reactor, synthesis, or spectroscopy.
+For consortium work, first read the [six-lab workflow](consortium-workflow.md). For a new synthesis, choose the lab and use **New batch + sample IDs**, then enter the shared procedure/version/reference and actual synthesis record. For an existing material, connect and use **Samples & models → Refresh from SciSure** to find it by canonical ID, lab, or local alias. Choose **Use for a new measurement / calculation**, or **Create a derived sample** for an aliquot or treated material. A shared procedure does not merge independent batches. Computations use separate model IDs and explicit optional links to physical samples.
+
+1. In **Files & mapping**, select CSV, XLSX, or JSON files. Choose the data-format/source lab and modality. The submitting, acquisition, and processing labs are separate choices in the context.
 2. Supply the scientific context. CATALYST does not infer scientific meaning from filenames. For spectroscopy, the context axis unit must match the mapping's source unit.
 3. For ordinary tables, choose the source file, worksheet, and header row; click **Read columns**. Select canonical fields and source units. Optional exact name aliases use JSON such as `{"CO2":"carbon dioxide"}`. Ignored columns remain in the original file.
 4. Supply the source export/version, mapping name, and mapping version. Changing established rules requires a new version. Profiles are embedded in the review package and can be reused from SciSure history.
 5. For the Rochester toolkit RWGS bundle, select the original GC report XLSX, analysis XLSX, summary CSV, and flows CSV, and check the toolkit option. Its dedicated profile checks cross-file relationships. The entered interval creates a separately documented nominal time axis. No default of 22.4 minutes is imposed on other runs.
-6. Click **Build review preview**. Inspect standardized values, warnings, and provenance. Resolve blocking errors, enter your reviewer name and note, acknowledge the review, and click **Approve this revision**. Editing the files, context, or mapping invalidates approval.
+6. Click **Build review preview**. Inspect standardized values, warnings, and **Lab & sample lineage**. Resolve blocking errors, enter your reviewer name and note, acknowledge the review, and click **Approve this revision**. Editing the files, context, or mapping invalidates approval. Reprocessing retains the acquisition's dataset ID; a new measurement gets a new dataset ID.
 
 ## Connect and send
 
@@ -36,4 +38,4 @@ Connect and select an experiment, then open **Read from SciSure**. **List saved 
 - Only the optional token is stored in the operating system credential store. It is never put in GitHub, packaged code, or a research manifest.
 - Shared tokens use the same SciSure account and permissions for everyone. CATALYST reviewer names are self-reported, not independent authenticated signatures. Native SciSure signing and permissions remain authoritative.
 
-This release imports toolkit scientific results; it does not execute or reproduce the GC processor. Synthesis and spectroscopy support explicit table mappings and contextual validation, not technique-specific scientific fitting or processing. Partner-specific profiles require representative data and review.
+This release imports toolkit scientific results; it does not execute or reproduce the GC processor. The additional technique and computational paths support explicit table mappings and contextual validation, not scientific fitting or calculation engines. Partner-specific profiles require representative data and review. The shared catalog covers identity-bearing CATALYST packages in the active SciSure group, up to 250 reviews. Native inventory links and cross-group catalogs are not implemented.

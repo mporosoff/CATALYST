@@ -14,6 +14,9 @@ from .model import (Source, Revision, InputError, MODALITIES, COMMON_CONTEXT, MO
 from .scisure import SciSureClient, SciSureError, SANDBOX, remote_id
 from .credentials import load_token, save_token, forget_token, CredentialError
 from .publication import Publisher, history, read_review
+from .traceability import (LAB_CHOICES, MATERIAL_KINDS, MODEL_RELATIONS, PHYSICAL_CONTEXT,
+    COMPUTATIONAL_CONTEXT, lab_id, lab_name, new_id, trace_context)
+from .catalog import load_catalog, search_catalog
 
 
 class ScrollFrame(ttk.Frame):
@@ -52,6 +55,8 @@ class Application:
         self.dirty = True
         self.pending_profile = None
         self.context_vars = {}
+        self.catalog = None
+        self.catalog_rows = []
         self.root.title(f'CATALYST {__version__} — Local review · SciSure storage')
         self.root.geometry('1160x820')
         self.root.minsize(850, 620)
@@ -77,13 +82,16 @@ class Application:
         self.import_tab = ScrollFrame(self.tabs)
         self.review_tab = ttk.Frame(self.tabs, padding=14)
         self.history_tab = ttk.Frame(self.tabs, padding=14)
+        self.catalog_tab = ttk.Frame(self.tabs, padding=14)
         for frame, label in [(self.import_tab, '1  Files & mapping'), (self.review_tab, '2  Review & approve'),
-                (self.connection_tab, '3  SciSure connection'), (self.history_tab, '4  Read from SciSure')]:
+                (self.connection_tab, '3  SciSure connection'), (self.history_tab, '4  Read from SciSure'),
+                (self.catalog_tab, '5  Samples & models')]:
             self.tabs.add(frame, text=label)
         self.build_connection()
         self.build_import()
         self.build_review()
         self.build_history()
+        self.build_catalog()
         ttk.Label(root, textvariable=self.status, padding=(20, 12), wraplength=1050).pack(fill='x')
         self.root.protocol('WM_DELETE_WINDOW', self.close)
         self.root.report_callback_exception = self.callback_error
@@ -239,6 +247,10 @@ class Application:
         self.history_rows = []
         self.remote_files = []
         self.loaded_review = None
+        self.catalog = None
+        self.catalog_rows = []
+        if hasattr(self, 'catalog_table'):
+            self.catalog_table.delete(*self.catalog_table.get_children())
         if hasattr(self, 'history_table'):
             self.history_table.delete(*self.history_table.get_children())
             self.file_table.delete(*self.file_table.get_children())
@@ -279,10 +291,11 @@ class Application:
         form = ttk.Frame(p)
         form.pack(fill='x', pady=8)
         self.title = self.watched()
-        self.entity = self.watched('university-of-rochester')
+        self.entity = self.watched('Rochester')
         self.modality = self.watched('reactor')
         self.label_entry(form, 0, 'Submission title', self.title)
-        self.label_entry(form, 1, 'Partner / entity identifier', self.entity)
+        ttk.Label(form, text='Data format / source lab').grid(row=1, column=0, sticky='w', pady=6)
+        ttk.Combobox(form, textvariable=self.entity, values=LAB_CHOICES, state='readonly').grid(row=1, column=1, sticky='ew')
         ttk.Label(form, text='Data modality').grid(row=2, column=0, sticky='w', pady=6)
         combo = ttk.Combobox(form, textvariable=self.modality, values=MODALITIES, state='readonly')
         combo.grid(row=2, column=1, sticky='ew')
@@ -292,6 +305,13 @@ class Application:
         ttk.Checkbutton(p, text='Import a Rochester toolkit RWGS bundle (original XLSX + analysis XLSX + summary CSV + flows CSV)',
             variable=self.toolkit).pack(anchor='w', pady=8)
         ttk.Label(p, text='Scientific context', style='Sub.TLabel').pack(anchor='w', pady=(12, 4))
+        ttk.Label(p, text='For existing materials, start in Samples & models to reuse the lab, batch, and procedure identity. '
+            'Local labels are kept separately from canonical IDs.', wraplength=950).pack(anchor='w', pady=5)
+        identity_actions = ttk.Frame(p)
+        identity_actions.pack(fill='x', pady=5)
+        ttk.Button(identity_actions, text='New batch + sample IDs', command=lambda: self.generate_identity('batch')).pack(side='left')
+        ttk.Button(identity_actions, text='New model ID', command=lambda: self.generate_identity('model')).pack(side='left', padx=6)
+        ttk.Button(identity_actions, text='New dataset ID', command=self.generate_dataset_id).pack(side='left')
         self.context_frame = ttk.Frame(p)
         self.context_frame.pack(fill='x')
         self.rebuild_context()
@@ -326,10 +346,42 @@ class Application:
         for child in self.context_frame.winfo_children():
             child.destroy()
         self.context_vars = {}
-        for row, (key, label) in enumerate((COMMON_CONTEXT | MODALITY_CONTEXT[self.modality.get()]).items()):
-            var = self.watched(old.get(key, ''))
+        labs = {'submittingLab', 'acquisitionLab', 'processingLab', 'originLab', 'sampleCreatedLab', 'modelCreatedLab', 'custodyFromLab'}
+        choices = {**{key: LAB_CHOICES for key in labs}, 'materialKind': MATERIAL_KINDS, 'modelRelation': MODEL_RELATIONS}
+        for row, (key, label) in enumerate((COMMON_CONTEXT | trace_context(self.modality.get()) | MODALITY_CONTEXT[self.modality.get()]).items()):
+            default = self.entity.get() if key in labs - {'custodyFromLab'} else ''
+            var = self.watched(old.get(key, default))
             self.context_vars[key] = var
-            self.label_entry(self.context_frame, row, label, var)
+            if key in choices:
+                ttk.Label(self.context_frame, text=label).grid(row=row, column=0, sticky='w', pady=5, padx=(0, 12))
+                ttk.Combobox(self.context_frame, textvariable=var, values=choices[key], state='readonly').grid(row=row, column=1, sticky='ew', pady=5)
+            else:
+                self.label_entry(self.context_frame, row, label, var)
+
+    def generate_dataset_id(self):
+        self.context_vars['datasetId'].set(new_id(self.context_vars['acquisitionLab'].get(), 'DS'))
+
+    def generate_identity(self, kind):
+        c = self.context_vars
+        if kind == 'model':
+            if self.modality.get() != 'computational':
+                messagebox.showinfo('CATALYST', 'Choose computational as the modality before creating a model.', parent=self.root)
+                return
+            c['specimenId'].set(new_id(c['modelCreatedLab'].get(), 'MDL'))
+            c['modelRelation'].set('no physical link')
+        else:
+            if self.modality.get() == 'computational':
+                messagebox.showinfo('CATALYST', 'Physical batch IDs belong to synthesis or measurement submissions.', parent=self.root)
+                return
+            origin = c['originLab'].get()
+            c['batchId'].set(new_id(origin, 'BAT'))
+            c['synthesisExecutionId'].set(new_id(origin, 'SYN'))
+            c['sampleCreatedLab'].set(origin)
+            c['specimenId'].set(new_id(origin, 'SMP'))
+            c['materialKind'].set('batch material')
+            c['parentSampleId'].set('')
+        self.generate_dataset_id()
+        self.status.set('New IDs assigned to this draft. Keep these IDs on container labels and in SciSure; publication registers them.')
 
     def choose_files(self):
         if self.busy:
@@ -360,7 +412,7 @@ class Application:
         self.source_changed()
         if sources and self.pending_profile:
             profile = self.pending_profile
-            if (profile['entity'], profile['modality'], profile['source_format']) == (self.entity.get(), self.modality.get(), sources[0].artifact['format']):
+            if (lab_id(profile['entity']), profile['modality'], profile['source_format']) == (lab_id(self.entity.get()), self.modality.get(), sources[0].artifact['format']):
                 self.sheet_choice.set(profile['sheet'])
                 self.read_columns(profile)
         self.invalidate()
@@ -495,6 +547,8 @@ class Application:
         detail_tabs.add(data_frame, text='Standardized values')
         issues_frame, self.issue_text = self.text_panel(detail_tabs)
         detail_tabs.add(issues_frame, text='Validation & warnings')
+        trace_frame, self.trace_text = self.text_panel(detail_tabs)
+        detail_tabs.add(trace_frame, text='Lab & sample lineage')
         json_frame, self.preview_text = self.text_panel(detail_tabs)
         detail_tabs.add(json_frame, text='Full revision & provenance')
         form = ttk.Frame(p)
@@ -515,6 +569,8 @@ class Application:
     def render_review(self, revision):
         payload = revision.value()
         preview = payload['preview']
+        self.show_text(self.trace_text, json.dumps(preview.get('traceability', {
+            'legacy_review': 'This older review has no structured consortium identity. Supply identity context before republishing.'}), ensure_ascii=False, indent=2))
         issues = preview['validation']['issues']
         errors = sum(i['severity'] == 'error' for i in issues)
         rows = preview['standardized'].get('rows', [])
@@ -572,6 +628,131 @@ class Application:
             self.approval_status.set('Published: original file checksums and completion receipt verified in SciSure.')
         self.run('Starting direct SciSure transfer…', lambda: publisher.publish(revision, approval, sources,
             lambda message: self.messages.put(('progress', message))), done)
+
+    def build_catalog(self):
+        p = self.catalog_tab
+        ttk.Label(p, text='Shared sample and model catalog', style='Heading.TLabel').pack(anchor='w')
+        ttk.Label(p, text='Read registered identities across experiments in the token’s active SciSure group. '
+            'Choose an existing material for a new measurement, or create a linked aliquot / treated material.', wraplength=1000).pack(anchor='w', pady=8)
+        actions = ttk.Frame(p)
+        actions.pack(fill='x')
+        ttk.Button(actions, text='Refresh from SciSure', command=self.refresh_catalog).pack(side='left')
+        self.catalog_query = tk.StringVar()
+        ttk.Entry(actions, textvariable=self.catalog_query, width=40).pack(side='left', padx=8)
+        ttk.Button(actions, text='Search IDs / labels / labs', command=self.filter_catalog).pack(side='left')
+        frame = ttk.Frame(p)
+        frame.pack(fill='both', expand=True, pady=10)
+        columns = ('id', 'origin', 'creator', 'batch', 'aliases', 'datasets')
+        self.catalog_table = ttk.Treeview(frame, columns=columns, show='headings', height=10)
+        for key, label in zip(columns, ('Canonical sample / model ID', 'Synthesis / model origin', 'Sample creator', 'Batch ID', 'Lab-specific labels', 'Datasets')):
+            self.catalog_table.heading(key, text=label)
+            self.catalog_table.column(key, width=240 if key in ('id', 'batch', 'aliases') else 140, stretch=False)
+        self.catalog_table.grid(row=0, column=0, sticky='nsew')
+        sy = ttk.Scrollbar(frame, orient='vertical', command=self.catalog_table.yview)
+        sx = ttk.Scrollbar(frame, orient='horizontal', command=self.catalog_table.xview)
+        self.catalog_table.configure(yscrollcommand=sy.set, xscrollcommand=sx.set)
+        sy.grid(row=0, column=1, sticky='ns')
+        sx.grid(row=1, column=0, sticky='ew')
+        frame.rowconfigure(0, weight=1)
+        frame.columnconfigure(0, weight=1)
+        buttons = ttk.Frame(p)
+        buttons.pack(fill='x')
+        ttk.Button(buttons, text='Use for a new measurement / calculation', command=lambda: self.use_catalog_subject(False)).pack(side='left')
+        ttk.Button(buttons, text='Create a derived sample', command=lambda: self.use_catalog_subject(True)).pack(side='left', padx=8)
+        ttk.Button(p, text='Repeat selected sample’s procedure as a new synthesis', command=self.repeat_catalog_procedure).pack(anchor='w', pady=7)
+        self.catalog_status = tk.StringVar(value='Connect first, then refresh. No catalog is cached on disk.')
+        ttk.Label(p, textvariable=self.catalog_status, wraplength=1000).pack(anchor='w', pady=10)
+
+    def refresh_catalog(self):
+        if not self.client or self.group_id is None:
+            self.tabs.select(self.connection_tab)
+            self.status.set('Connect to SciSure before reading the shared catalog.')
+            return
+        client, group = self.client, self.group_id
+        def done(catalog):
+            self.catalog = catalog
+            self.filter_catalog()
+            self.catalog_status.set(f'{len(catalog["entries"])} completed reviews scanned; '
+                f'{len(catalog["pending"])} incomplete transfers excluded from selection; '
+                f'{catalog["legacy_reviews"]} older reviews need identity registration. Scope: active group {group}.')
+        self.run('Reading the shared identity catalog from SciSure…', lambda: load_catalog(client, group,
+            lambda message: self.messages.put(('progress', message))), done)
+
+    def filter_catalog(self):
+        self.catalog_rows = search_catalog(self.catalog, self.catalog_query.get()) if self.catalog else []
+        self.catalog_table.delete(*self.catalog_table.get_children())
+        for index, row in enumerate(self.catalog_rows):
+            s = row['subject']
+            self.catalog_table.insert('', 'end', iid=str(index), values=(s['id'], lab_name(row['origin_lab']),
+                lab_name(s['creator_lab']), s.get('batch_id', 'Computational model'), ', '.join(sorted(row['aliases'])), len(row['datasets'])))
+
+    def use_catalog_subject(self, derived=False):
+        selection = self.catalog_table.selection()
+        if self.busy or not selection:
+            return
+        row = self.catalog_rows[int(selection[0])]
+        entry, subject = row['entry'], row['subject']
+        computational = 'model' in entry['trace']
+        if derived and computational:
+            self.status.set('A computational model is not a physical parent sample.')
+            return
+        if computational:
+            self.modality.set('computational')
+        elif self.modality.get() in ('computational', 'synthesis'):
+            self.modality.set('XRD')
+        self.rebuild_context()
+        fields = COMPUTATIONAL_CONTEXT if computational else PHYSICAL_CONTEXT
+        for key in fields:
+            if not key.startswith('custody') and key != 'receivedAt':
+                self.context_vars[key].set(entry['context'].get(key, ''))
+        c = self.context_vars
+        c['specimenId'].set(subject['id'])
+        for key in ('localSampleId', 'runId', 'acquiredAt', 'acquiredBy', 'methodId', 'methodVersion', 'processingVersion'):
+            c[key].set('')
+        for key in MODALITY_CONTEXT[self.modality.get()]:
+            c[key].set('')
+        for key in ('custodyFromLab', 'custodySampleId', 'custodyRecord', 'receivedAt'):
+            if key in c: c[key].set('')
+        c['acquisitionLab'].set(lab_name(self.entity.get()))
+        c['processingLab'].set(lab_name(self.entity.get()))
+        if derived:
+            c['sampleCreatedLab'].set(lab_name(self.entity.get()))
+            c['specimenId'].set(new_id(self.entity.get(), 'SMP'))
+            c['parentSampleId'].set(subject['id'])
+            c['materialKind'].set('aliquot')
+            c['materialState'].set('')
+            if lab_id(self.entity.get()) != subject['creator_lab']:
+                c['custodySampleId'].set(subject['id'])
+        self.generate_dataset_id()
+        self.revision = self.approval = self.parent = None
+        self.invalidate()
+        self.tabs.select(self.import_tab)
+        self.status.set('Identity reused for a new dataset. Enter the actual acquisition lab, method, local labels, measurement context, and handoff evidence.')
+
+    def repeat_catalog_procedure(self):
+        selection = self.catalog_table.selection()
+        if self.busy or not selection:
+            return
+        entry = self.catalog_rows[int(selection[0])]['entry']
+        if 'batch' not in entry['trace']:
+            self.status.set('Choose a physical sample to repeat its synthesis procedure.')
+            return
+        self.modality.set('synthesis')
+        self.rebuild_context()
+        c = self.context_vars
+        for variable in c.values(): variable.set('')
+        for key in ('submittingLab', 'acquisitionLab', 'processingLab', 'originLab', 'sampleCreatedLab'):
+            c[key].set(lab_name(self.entity.get()))
+        procedure = entry['trace']['batch']['procedure']
+        for key, value in (('procedureId', procedure['id']), ('procedureVersion', procedure['version']),
+                ('procedureReference', procedure['reference'])):
+            c[key].set(value)
+        self.generate_identity('batch')
+        self.revision = self.approval = self.parent = None
+        self.invalidate()
+        self.tabs.select(self.import_tab)
+        self.status.set('Shared procedure copied into a new lab-specific synthesis draft. '
+            'Enter this execution’s actual record, date, batch label, deviations, state, and scale.')
 
     def build_history(self):
         p = self.history_tab
@@ -647,7 +828,7 @@ class Application:
         self.new_submission(ask=False)
         self.parent = payload['id']
         self.title.set(payload['title'])
-        self.entity.set(preview['entity'])
+        self.entity.set(lab_name(preview['entity']))
         self.modality.set(preview['modality'])
         self.rebuild_context()
         for key, value in preview['context'].items():
@@ -730,12 +911,15 @@ class Application:
         self.pending_profile = None
         self.title.set('')
         for var in self.context_vars.values(): var.set('')
+        for key in ('submittingLab', 'acquisitionLab', 'processingLab', 'originLab', 'sampleCreatedLab', 'modelCreatedLab'):
+            if key in self.context_vars: self.context_vars[key].set(lab_name(self.entity.get()))
         self.sources = []
         self.set_sources([])
         self.review_heading.set('Build a preview to review the standardized data.')
         self.data_table.delete(*self.data_table.get_children())
         self.show_text(self.issue_text, '')
         self.show_text(self.preview_text, '')
+        self.show_text(self.trace_text, '')
         self.acknowledge.set(False)
 
     def close(self):
