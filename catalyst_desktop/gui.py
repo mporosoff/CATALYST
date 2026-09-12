@@ -17,6 +17,7 @@ from .publication import Publisher, history, read_review
 from .traceability import (LAB_CHOICES, MATERIAL_KINDS, MODEL_RELATIONS, PHYSICAL_CONTEXT,
     COMPUTATIONAL_CONTEXT, lab_id, lab_name, new_id, trace_context)
 from .catalog import load_catalog, search_catalog
+from .integration import inspect_setup, setup_summary
 
 
 class ScrollFrame(ttk.Frame):
@@ -45,6 +46,7 @@ class Application:
         self.approval = None
         self.parent = None
         self.publisher = None
+        self.transfer_operations = {}  # Keep uncertain-write guards across reconnects for this app session.
         self.client = None
         self.destination = None
         self.group_id = None
@@ -78,7 +80,7 @@ class Application:
         ttk.Label(header, text='  Catalysis data · Review locally, keep the record in SciSure').pack(side='left', padx=16)
         self.tabs = ttk.Notebook(root)
         self.tabs.pack(fill='both', expand=True, padx=16)
-        self.connection_tab = ttk.Frame(self.tabs, padding=20)
+        self.connection_tab = ScrollFrame(self.tabs)
         self.import_tab = ScrollFrame(self.tabs)
         self.review_tab = ttk.Frame(self.tabs, padding=14)
         self.history_tab = ttk.Frame(self.tabs, padding=14)
@@ -165,7 +167,7 @@ class Application:
         self.root.after(100, self.poll)
 
     def build_connection(self):
-        p = self.connection_tab
+        p = self.connection_tab.body
         ttk.Label(p, text='Connect directly to SciSure', style='Heading.TLabel').pack(anchor='w')
         ttk.Label(p, text='The token is sent only to the verified SciSure sandbox. No hosted proxy is used.', wraplength=900).pack(anchor='w', pady=8)
         fields = ttk.Frame(p)
@@ -193,6 +195,40 @@ class Application:
         self.destination_status = tk.StringVar(value='No destination verified.')
         ttk.Label(p, textvariable=self.destination_status, wraplength=950).pack(anchor='w', pady=10)
         ttk.Label(p, text='Shared tokens use the token account’s permissions and SciSure identity. Reviewer names in CATALYST are self-reported.', wraplength=900).pack(anchor='w', pady=12)
+        native_fields = ttk.Frame(p)
+        native_fields.pack(fill='x')
+        self.inspect_sample = tk.StringVar()
+        self.inspect_protocol = tk.StringVar()
+        self.label_entry(native_fields, 0, 'Existing SciSure sample ID (optional check)', self.inspect_sample)
+        self.label_entry(native_fields, 1, 'SciSure protocol version ID (optional check)', self.inspect_protocol)
+        ttk.Button(p, text='Inspect native SciSure setup (read only)', command=self.inspect_integration).pack(anchor='w', pady=5)
+
+    def inspect_integration(self):
+        if not self.client or self.group_id is None:
+            self.status.set('Connect first to inspect native sample types and account permissions.')
+            return
+        client, group = self.client, self.group_id
+        try:
+            sid = remote_id(self.inspect_sample.get()) if self.inspect_sample.get().strip() else None
+            pid = remote_id(self.inspect_protocol.get()) if self.inspect_protocol.get().strip() else None
+        except SciSureError as e:
+            messagebox.showerror('CATALYST', str(e), parent=self.root)
+            return
+        index = self.experiment.current()
+        eid = self.experiments[index]['experimentID'] if 0 <= index < len(self.experiments) else None
+        def done(report):
+            window = tk.Toplevel(self.root)
+            window.title('SciSure integration setup — read-only findings')
+            window.geometry('1000x700')
+            tabs = ttk.Notebook(window)
+            tabs.pack(fill='both', expand=True, padx=12, pady=12)
+            for label, contents in [('Setup overview', setup_summary(report)), ('Field details', json.dumps(report, ensure_ascii=False, indent=2))]:
+                frame, text = self.text_panel(tabs, height=30)
+                tabs.add(frame, text=label)
+                self.show_text(text, contents)
+            self.status.set('Setup inspection finished. No sample, field, protocol, or permission was changed.')
+        self.run('Inspecting native SciSure sample fields and account scope…', lambda: inspect_setup(client, group,
+            lambda message: self.messages.put(('progress', message)), experiment_id=eid, sample_id=sid, protocol_version_id=pid), done)
 
     def connect(self):
         if self.busy:
@@ -273,7 +309,8 @@ class Application:
         client, eid, gid = self.client, self.experiments[index]['experimentID'], self.group_id
         def done(destination):
             self.destination = destination
-            self.publisher = Publisher(client, destination)
+            key = (destination['tenant'], gid, eid)
+            self.publisher = Publisher(client, destination, self.transfer_operations.setdefault(key, {}))
             self.destination_status.set(f'Verified: {destination["experiment_name"]} · experiment {eid} · group {gid}')
             self.status.set('Destination verified. Sending still requires an approved revision and a transfer confirmation.')
         self.run('Verifying the destination…', lambda: client.destination(eid, gid), done)
@@ -281,10 +318,11 @@ class Application:
     def build_import(self):
         p = self.import_tab.body
         ttk.Label(p, text='Start with the original files', style='Heading.TLabel').pack(anchor='w')
-        ttk.Label(p, text='CSV, XLSX, or flat-record JSON · Up to 6 files · 20 MiB each / 40 MiB combined', wraplength=950).pack(anchor='w', pady=7)
+        ttk.Label(p, text='Tables: CSV, XLSX, flat JSON. Originals: images, PDFs, native instrument files, structures and logs.\nUp to 6 files · 20 MiB each / 40 MiB combined', wraplength=950).pack(anchor='w', pady=7)
         actions = ttk.Frame(p)
         actions.pack(fill='x')
         ttk.Button(actions, text='Select files…', command=self.choose_files).pack(side='left')
+        ttk.Button(actions, text='Add images / supporting files…', command=self.add_supporting_files).pack(side='left', padx=8)
         ttk.Button(actions, text='New submission', command=self.new_submission).pack(side='left', padx=8)
         self.file_summary = tk.StringVar(value='No files selected.')
         ttk.Label(p, textvariable=self.file_summary, wraplength=950).pack(anchor='w', pady=8)
@@ -304,6 +342,10 @@ class Application:
         self.toolkit.trace_add('write', self.invalidate)
         ttk.Checkbutton(p, text='Import a Rochester toolkit RWGS bundle (original XLSX + analysis XLSX + summary CSV + flows CSV)',
             variable=self.toolkit).pack(anchor='w', pady=8)
+        self.raw_only = tk.BooleanVar(value=False)
+        self.raw_only.trace_add('write', self.invalidate)
+        ttk.Checkbutton(p, text='Preserve original files with context only — no standardized table or scientific interpretation',
+            variable=self.raw_only).pack(anchor='w', pady=5)
         ttk.Label(p, text='Scientific context', style='Sub.TLabel').pack(anchor='w', pady=(12, 4))
         ttk.Label(p, text='For existing materials, start in Samples & models to reuse the lab, batch, and procedure identity. '
             'Local labels are kept separately from canonical IDs.', wraplength=950).pack(anchor='w', pady=5)
@@ -387,24 +429,31 @@ class Application:
         if self.busy:
             return
         paths = filedialog.askopenfilenames(parent=self.root, title='Select original and companion files',
-            filetypes=[('Supported data', '*.csv *.xlsx *.json'), ('All files', '*.*')])
+            filetypes=[('All data and images', '*.*'), ('Tables', '*.csv *.xlsx *.json'),
+                ('Images', '*.png *.jpg *.jpeg *.tif *.tiff *.bmp *.gif *.webp *.svg')])
         if not paths:
             return
         if len(paths) > 6:
             messagebox.showerror('CATALYST', 'Select no more than six files.', parent=self.root)
             return
         def work():
-            sources = [Source.from_path(p) for p in paths]
+            sources = [Source.from_path(p, parse=Path(p).suffix.lower() in ('.csv', '.xlsx', '.json')) for p in paths]
             check_sources(sources)
             return sources
-        self.run('Reading source files into memory…', work, self.set_sources)
+        def done(sources):
+            self.raw_only.set(all(s.artifact['format'] == 'binary' for s in sources))
+            if self.raw_only.get():
+                self.toolkit.set(False)
+            self.set_sources(sources)
+        self.run('Reading source files into memory…', work, done)
 
     def set_sources(self, sources):
         self.sources = sources
-        self.file_summary.set('\n'.join(f'{s.name}  ·  {len(s.content):,} bytes  ·  SHA-256 {s.artifact["sha256"][:12]}…' for s in sources))
+        self.file_summary.set('\n'.join(f'{s.name}  ·  {len(s.content):,} bytes  ·  '
+            f'{"preserved, not parsed" if s.artifact["format"] == "binary" else "table input"}  ·  SHA-256 {s.artifact["sha256"][:12]}…' for s in sources))
         self.source_choice.configure(values=[s.name for s in sources])
         if sources:
-            self.source_choice.current(0)
+            self.source_choice.current(next((i for i, s in enumerate(sources) if s.artifact['format'] != 'binary'), 0))
             if not self.title.get():
                 self.title.set(Path(sources[0].name).stem)
         else:
@@ -412,11 +461,43 @@ class Application:
         self.source_changed()
         if sources and self.pending_profile:
             profile = self.pending_profile
-            if (lab_id(profile['entity']), profile['modality'], profile['source_format']) == (lab_id(self.entity.get()), self.modality.get(), sources[0].artifact['format']):
+            source = sources[self.source_choice.current()]
+            if (lab_id(profile['entity']), profile['modality'], profile['source_format']) == (lab_id(self.entity.get()), self.modality.get(), source.artifact['format']):
                 self.sheet_choice.set(profile['sheet'])
                 self.read_columns(profile)
         self.invalidate()
         self.status.set('Source bytes are in memory. No extra research files were written to disk.')
+
+    def add_supporting_files(self):
+        if self.busy: return
+        paths = filedialog.askopenfilenames(parent=self.root, title='Preserve images, native instrument files, structures, logs or method records',
+            filetypes=[('All originals — preserve bytes without parsing', '*.*'),
+                ('Images', '*.png *.jpg *.jpeg *.tif *.tiff *.bmp *.gif *.webp *.svg')])
+        if not paths: return
+        current = tuple(self.sources)
+        if len(current) + len(paths) > 6:
+            messagebox.showerror('CATALYST', 'Select no more than six files in total.', parent=self.root)
+            return
+        selected = self.source_choice.get()
+        sheet = self.sheet_choice.get()
+        draft = {name: (target.get(), unit.get(), aliases.get()) for name, target, unit, aliases in self.rules}
+        def work():
+            result = [*current, *(Source.from_path(path, parse=False) for path in paths)]
+            check_sources(result)
+            return result
+        def done(sources):
+            if all(s.artifact['format'] == 'binary' for s in sources):
+                self.toolkit.set(False)
+                self.raw_only.set(True)
+            self.set_sources(sources)
+            if draft and selected in [s.name for s in sources]:
+                self.source_choice.set(selected)
+                self.source_changed()
+                self.sheet_choice.set(sheet)
+                self.read_columns({'rules': [dict(source=name, target=values[0], unit=values[1]) for name, values in draft.items()]})
+                for name, _, _, aliases in self.rules:
+                    if name in draft: aliases.set(draft[name][2])
+        self.run('Reading supporting files into memory without parsing or execution…', work, done)
 
     def source_changed(self):
         self.invalidate()
@@ -465,7 +546,7 @@ class Application:
             messagebox.showerror('CATALYST', 'Choose a valid source worksheet and header row with unique text column names.', parent=self.root)
 
     def current_profile(self):
-        if self.toolkit.get():
+        if self.toolkit.get() or self.raw_only.get():
             return None
         index = self.source_choice.current()
         if index < 0:
@@ -492,13 +573,13 @@ class Application:
             sources = tuple(self.sources)
             context = {k: v.get() for k, v in self.context_vars.items()}
             entity, modality, title = self.entity.get(), self.modality.get(), self.title.get()
-            index, toolkit = self.source_choice.current(), self.toolkit.get()
+            index, toolkit, raw_only = self.source_choice.current(), self.toolkit.get(), self.raw_only.get()
             parent = self.revision.value()['id'] if self.revision else self.parent
         except InputError as e:
             messagebox.showerror('CATALYST', str(e), parent=self.root)
             return
         def work():
-            preview = build_preview(sources, entity, modality, context, profile, index, toolkit)
+            preview = build_preview(sources, entity, modality, context, profile, index, toolkit, raw_only)
             return Revision.create(preview, title, parent)
         def done(revision):
             self.revision = revision
@@ -533,6 +614,7 @@ class Application:
         self.review_heading = tk.StringVar(value='Build a preview to review the standardized data.')
         ttk.Label(p, textvariable=self.review_heading, style='Sub.TLabel', wraplength=1000).pack(anchor='w')
         detail_tabs = ttk.Notebook(p)
+        self.review_details = detail_tabs
         detail_tabs.pack(fill='both', expand=True, pady=8)
         self.data_table = ttk.Treeview(detail_tabs, show='headings', height=8)
         data_frame = ttk.Frame(detail_tabs)
@@ -574,7 +656,8 @@ class Application:
         issues = preview['validation']['issues']
         errors = sum(i['severity'] == 'error' for i in issues)
         rows = preview['standardized'].get('rows', [])
-        self.review_heading.set(f'{payload["title"]} · {len(rows)} rows · {errors} blocking errors · revision {payload["id"][:8]}')
+        mode = 'FILES + CONTEXT ONLY' if preview.get('data_status') == 'original_files_only' else f'{len(rows)} rows'
+        self.review_heading.set(f'{payload["title"]} · {mode} · {errors} blocking errors · revision {payload["id"][:8]}')
         lines = [f'{i["severity"].upper()} · {i["code"]}\n{i["message"]}\n' for i in issues]
         self.show_text(self.issue_text, '\n'.join(lines) or 'No validation issues.')
         # Full payload remains immutable in memory; cap rendering to keep the UI responsive.
@@ -587,6 +670,10 @@ class Application:
             for q in row.get('quantities', []):
                 values[q['field'] + ' [' + q['unit'] + ']'] = q['value_decimal']
             flat.append(values)
+        if preview.get('data_status') == 'original_files_only':
+            flat = [dict(original_file=a['filename'], bytes=a['size_bytes'], sha256=a['sha256'],
+                handling='Original bytes; no scientific interpretation') for a in preview['artifacts']]
+        self.review_details.tab(0, text='Original files' if preview.get('data_status') == 'original_files_only' else 'Standardized values')
         columns = list(dict.fromkeys(k for row in flat for k in row))
         self.data_table.configure(columns=[str(i) for i in range(len(columns))])
         for i, col in enumerate(columns):
@@ -595,7 +682,9 @@ class Application:
         for row in flat:
             self.data_table.insert('', 'end', values=[str(row.get(c, '')) if row.get(c) is not None else '—' for c in columns])
         self.approval_status.set('Resolve blocking errors before approval.' if errors else 'Ready for review. Approval applies only to this immutable revision.')
-        self.status.set(f'Preview ready. Showing up to 1,000 rows; all {len(rows)} rows remain in the revision.')
+        self.status.set(f'Preview ready. {len(flat)} original files with context; no standardized data rows.'
+            if preview.get('data_status') == 'original_files_only'
+            else f'Preview ready. Showing up to 1,000 rows; all {len(rows)} rows remain in the revision.')
 
     def approve(self):
         try:
@@ -771,11 +860,13 @@ class Application:
         ttk.Separator(p).pack(fill='x', pady=12)
         file_actions = ttk.Frame(p)
         file_actions.pack(fill='x')
-        ttk.Button(file_actions, text='Browse all experiment files', command=self.browse_files).pack(side='left')
+        ttk.Button(file_actions, text='Browse file attachments', command=self.browse_files).pack(side='left')
         ttk.Button(file_actions, text='Read selected file', command=self.read_file).pack(side='left', padx=6)
-        self.file_table = ttk.Treeview(p, columns=('name', 'section', 'size'), show='headings', height=6)
-        for key, name in [('name', 'File'), ('section', 'Section'), ('size', 'Bytes')]:
+        self.file_table = ttk.Treeview(p, columns=('name', 'section', 'id', 'parent', 'stored', 'size'), show='headings', height=6)
+        for key, name, width in [('name', 'File', 240), ('section', 'Section', 180), ('id', 'File ID', 85),
+                ('parent', 'Previous file ID', 115), ('stored', 'Stored', 165), ('size', 'Bytes', 85)]:
             self.file_table.heading(key, text=name)
+            self.file_table.column(key, width=width, minwidth=60)
         self.file_table.pack(fill='x', pady=7)
         frame, self.remote_text = self.text_panel(p, height=8)
         frame.pack(fill='both', expand=True)
@@ -835,6 +926,7 @@ class Application:
             if key in self.context_vars:
                 self.context_vars[key].set(value)
         self.toolkit.set('toolkit_source_review' in preview)
+        self.raw_only.set(preview.get('data_status') == 'original_files_only')
         if loaded['sources']:
             self.set_sources(loaded['sources'])
         else:
@@ -869,13 +961,14 @@ class Application:
                 sid = remote_id(section['expJournalID'])
                 for file in client.list(f'/api/v1/experiments/sections/{sid}/files'):
                     result.append(dict(file, section_id=sid, section_name=section.get('sectionHeader', str(sid))))
-            return destination, result
+            return destination, sorted(result, key=lambda f: remote_id(f['experimentFileID']), reverse=True)
         def done(result):
             self.files_destination, self.remote_files = result
             self.file_table.delete(*self.file_table.get_children())
             for i, f in enumerate(self.remote_files):
-                self.file_table.insert('', 'end', iid=str(i), values=(f.get('realName'), f['section_name'], f.get('fileSize')))
-            self.status.set(f'{len(self.remote_files)} files listed. Reading a file does not save a local copy.')
+                self.file_table.insert('', 'end', iid=str(i), values=(f.get('realName'), f['section_name'],
+                    f['experimentFileID'], f.get('parentExperimentFileID') or '—', f.get('stored') or '—', f.get('fileSize')))
+            self.status.set(f'{len(self.remote_files)} attachments listed, newest file IDs first. Same-name Office revisions retain separate IDs. Embedded notebook images use separate SciSure endpoints.')
         self.run('Listing experiment files…', work, done)
 
     def read_file(self):
@@ -909,6 +1002,8 @@ class Application:
             return
         self.revision = self.approval = self.parent = None
         self.pending_profile = None
+        self.raw_only.set(False)
+        self.toolkit.set(False)
         self.title.set('')
         for var in self.context_vars.values(): var.set('')
         for key in ('submittingLab', 'acquisitionLab', 'processingLab', 'originLab', 'sampleCreatedLab', 'modelCreatedLab'):

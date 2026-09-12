@@ -1,6 +1,6 @@
 # Consortium sample and data workflow
 
-CATALYST 0.3 records separate identities for the shared synthesis procedure, each laboratory's synthesis execution and batch, individual physical samples, measurement datasets, and computational models. A common procedure connects independent executions for comparison. It never establishes that two batches or samples are the same material.
+CATALYST 0.4 records separate identities for the shared synthesis procedure, each laboratory's synthesis execution and batch, individual physical samples, measurement datasets, and computational models. A common procedure connects independent executions for comparison. It never establishes that two batches or samples are the same material.
 
 ## The six laboratories
 
@@ -59,8 +59,9 @@ Local labels are stored as exact `(lab, label, canonical ID)` aliases. The same 
 | CO uptake | Pretreatment, adsorption temperature, uptake mass/gas basis, calibration, explicit CO:site assumption or `not calculated` |
 | Other spectroscopy | Technique, axis and signal units, calibration, method/version |
 | Computational | Model description and input structure, program/version, method/theory level, parameters, environment, convergence, quantity/unit/reference basis |
+| Imaging / sample photographs | Image type/technique, what is shown and acquisition conditions, scale/calibration reference or explicit non-quantitative status |
 
-These are contextual validation and explicit table-import paths. They do not perform phase identification, XAFS fitting, peak integration, dispersion calculations, or computational jobs. Original source values and producer results remain preserved. Additional native vendor formats, simulation structure/log formats, or scientific transformations require separate readers and reviewed processing recipes; this release accepts CSV/XLSX/flat-record JSON tables.
+These are contextual validation and explicit CSV/XLSX/flat-record JSON table-import paths. They do not perform phase identification, XAFS fitting, peak integration, dispersion calculations, or computational jobs. Native vendor files, images, PDFs, simulation structures and logs can be preserved as uninterpreted originals beside a table or in a files-and-context-only submission. Their scientific interpretation still requires separate readers and reviewed processing recipes. Images retain their original metadata and bytes; no image analysis or conversion runs. One submission's files share its declared subject, dataset, and context, so unrelated images/runs require separate submissions.
 
 A computational model has its own `MDL` identity and never needs an invented physical batch. Use `no physical link` for a theoretical model. Otherwise declare whether it represents, derives from, or is compared with named physical samples, and record the basis for that relationship. A model being compared to a sample is not evidence that it exactly represents that material. Configuration IDs and computed quantities can be mapped from output tables; units and reference bases must remain explicit. Materially changed model definitions require a new model ID.
 
@@ -68,7 +69,7 @@ A computational model has its own `MDL` identity and never needs an invented phy
 
 The **Samples & models** catalog reads identity-bearing CATALYST packages across experiments in the token's active group. Search by full ID, batch ID, local alias, or origin lab. Use a selected identity for a new measurement/calculation, or create a linked derivative. Shared identity fields are copied; new acquisition fields are cleared and require review. Completed records can be referenced; incomplete transfers reserve their IDs but cannot establish a new parent/model link.
 
-This version stores the graph in approved JSON attachments beside raw files and transfer receipts. It does not yet create native SciSure inventory Samples, resolve procedure references against the Protocol API, or populate native Used/Generated sample links. Those need the tenant's actual sample types and fields inspected and tested with a token. Native Samples should ultimately represent the physical batches/containers, native protocols the shared procedures, and experiments the synthesis/measurement/calculation work. Computational models should remain distinguishable from physical inventory.
+This version stores the graph in approved JSON attachments beside raw files and transfer receipts. It does not yet create native SciSure inventory Samples, bind submitted procedure references to native protocols, or populate native Used/Generated sample links. The new read-only setup inspector retrieves actual sample types/fields and can inspect an existing sample and exact protocol version. Completing native writes still needs explicit field bindings and tenant tests. Native Samples should ultimately represent physical materials/containers, protocols the shared procedures, and experiments the synthesis/measurement/calculation work. Computational models should remain distinguishable from physical inventory.
 
 Use one accessible consortium group for this first version. The catalog cannot validate links into another group, inaccessible experiments, native-only samples, or older CATALYST packages without structured identities. Publication fails rather than using a partial catalog when a read fails or the 250-review limit is exceeded. There is no additional local database, GitHub research store, or hosted proxy. Direct SciSure requests are explicit refresh/read/publish operations.
 

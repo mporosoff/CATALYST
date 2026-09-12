@@ -143,6 +143,8 @@ class FakeSciSure:
         self.experiment = dict(experimentID=42,groupID=7,studyID=8,projectID=9,deleted=False,template=False,signatureStatus='None',name='Synthetic experiment')
 
     def response(self, value):
+        if isinstance(value, dict) and 'data' in value:
+            value = dict(value, totalRecords=len(value['data']), maxRecords=100, currentPage=0, recordCount=len(value['data']))
         return 200, encode(value)
 
     def __call__(self, url, method, headers, body):

@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import re
 import ssl
+import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit, unquote
 from urllib.request import Request, build_opener, HTTPRedirectHandler, HTTPSHandler, ProxyHandler
@@ -13,9 +14,10 @@ from .model import encode, MAX_FILE
 SANDBOX = 'https://sandbox.elabjournal.com'
 
 class SciSureError(Exception):
-    def __init__(self, message, uncertain=False, status=None):
+    def __init__(self, message, uncertain=False, status=None, retry_after=None):
         super().__init__(message)
         self.uncertain, self.status = uncertain, status
+        self.retry_after = retry_after
 
 def tenant_origin(value):
     if value.rstrip('/') != SANDBOX:
@@ -35,13 +37,14 @@ class NoRedirects(HTTPRedirectHandler):
         return None
 
 class SciSureClient:
-    def __init__(self, token, origin=SANDBOX, transport=None):
+    def __init__(self, token, origin=SANDBOX, transport=None, sleep=None):
         self.origin = tenant_origin(origin)
         if not isinstance(token, str) or not token.strip() or len(token) > 8192 or any(ord(c) < 33 or ord(c) > 126 for c in token.strip()):
             raise SciSureError('Enter the SciSure API token without spaces or line breaks.')
         self._token = token.strip()
         self._transport = transport
         self._opener = None
+        self._sleep = sleep or time.sleep
 
     def __repr__(self):
         return f'SciSureClient(origin={self.origin!r}, token=<redacted>)'
@@ -60,19 +63,38 @@ class SciSureClient:
             body = data if isinstance(data, bytes) else encode(data)
             if len(body) > MAX_FILE:
                 raise SciSureError('The upload exceeds the 20 MiB transfer limit.')
-            headers['Content-Type'] = 'application/octet-stream' if isinstance(data, bytes) else 'application/json'
+            headers['Content-Type'] = 'application/octet-stream' if isinstance(data, bytes) else 'application/json; charset=utf-8'
         try:
-            if self._transport is not None:
-                status, content = self._transport(self.origin + path, method, headers, body)
-            else:
-                if self._opener is None:
-                    self._opener = build_opener(ProxyHandler({}), NoRedirects(), HTTPSHandler(context=ssl.create_default_context()))
-                request = Request(self.origin + path, data=body, method=method, headers=headers)
-                with self._opener.open(request, timeout=30) as response:
-                    status = response.status
-                    content = response.read(MAX_FILE + 1)
+            for attempt in range(3):
+                response_headers = {}
+                try:
+                    if self._transport is not None:
+                        result = self._transport(self.origin + path, method, headers, body)
+                        status, content = result[:2]
+                        response_headers = result[2] if len(result) > 2 else {}
+                    else:
+                        if self._opener is None:
+                            self._opener = build_opener(ProxyHandler({}), NoRedirects(), HTTPSHandler(context=ssl.create_default_context()))
+                        request = Request(self.origin + path, data=body, method=method, headers=headers)
+                        with self._opener.open(request, timeout=30) as response:
+                            status, response_headers = response.status, response.headers
+                            content = response.read(MAX_FILE + 1)
+                except HTTPError as e:
+                    status, response_headers, content = e.code, e.headers, b''
+                    e.close()
+                if status != 429:
+                    break
+                retry = response_headers.get('Retry-After', response_headers.get('retry-after', str(2 ** attempt)))
+                try: delay = max(0, int(retry))
+                except (TypeError, ValueError): delay = 2 ** attempt
+                if write or attempt == 2 or delay > 10:
+                    raise SciSureError(f'SciSure rate limited the request. Wait {delay} seconds before checking or retrying.',
+                        False, 429, delay)
+                self._sleep(delay)
             if not 200 <= status < 300:
-                raise SciSureError(f'SciSure returned HTTP {status}. Check permissions and the selected destination.', write, status)
+                rejected = status in (400, 401, 403, 404, 405, 409, 413, 415, 422)
+                raise SciSureError(f'SciSure returned HTTP {status}. Check the token, permissions, and selected destination.',
+                    write and not rejected, status)
             if len(content) > MAX_FILE:
                 raise SciSureError('SciSure response exceeds the supported size.', write)
             if binary:
@@ -80,24 +102,42 @@ class SciSureClient:
             return json.loads(content.decode('utf-8')) if content else None
         except SciSureError:
             raise
-        except HTTPError as e:
-            status = e.code
-            e.close()
-            raise SciSureError(f'SciSure returned HTTP {status}. Check the token, permissions, and destination.', write, status) from None
         except (OSError, URLError, ValueError, TimeoutError):
             raise SciSureError('The transfer outcome is unknown. Check transfer status before retrying.' if write
                 else 'SciSure could not be read. Check the connection and try again.', write) from None
 
     def list(self, path):
-        rows = []
-        for page in range(10):
+        rows, expected_total, page_size, seen = [], None, None, set()
+        for page in range(1000):
             response = self.request(path + ('&' if '?' in path else '?') + urlencode({'$page': page, '$records': 100}))
-            if not isinstance(response, dict) or not isinstance(response.get('data'), list) or type(response.get('hasNextPage')) is not bool:
+            if not isinstance(response, dict) or not isinstance(response.get('data'), list):
                 raise SciSureError('SciSure returned an unsupported paginated response.')
-            rows.extend(response['data'])
-            if not response['hasNextPage']:
+            data = response['data']
+            total, size = response.get('totalRecords'), response.get('maxRecords')
+            if type(total) is not int or total < 0 or type(size) is not int or not 1 <= size <= 1000:
+                raise SciSureError('SciSure pagination is missing valid totalRecords/maxRecords; a partial result cannot be used.')
+            if total > 1000:
+                raise SciSureError('More than 1,000 records were returned. Narrow the SciSure workspace.')
+            if expected_total is None:
+                expected_total, page_size = total, size
+            if (total != expected_total or size != page_size or response.get('currentPage', page) != page
+                    or response.get('recordCount', len(data)) != len(data)
+                    or len(data) != min(size, max(0, total - page * size))):
+                raise SciSureError('SciSure pagination changed or is incomplete. Refresh before continuing.')
+            for item in data:
+                if not isinstance(item, dict):
+                    raise SciSureError('SciSure returned an unsupported list record.')
+                # Prefer the record's own ID over mutable fields so page shifts cannot hide a duplicate.
+                id_key = next((k for k in ('experimentFileID', 'expJournalID', 'sampleTypeMetaID', 'sampleID',
+                    'sampleTypeID', 'protVersionID', 'experimentID', 'userID') if k in item), None)
+                fingerprint = encode([id_key, item[id_key]]) if id_key else encode(item)
+                if fingerprint in seen:
+                    raise SciSureError('SciSure repeated a paginated record. Refresh before continuing.')
+                seen.add(fingerprint)
+            rows.extend(data)
+            if len(rows) == total:
                 return rows
-        raise SciSureError('More than 1,000 records were returned. Choose a smaller test workspace.')
+        raise SciSureError('SciSure pagination did not complete.')
 
     def check_connection(self):
         group = self.request('/api/v1/groups/active')

@@ -11,6 +11,7 @@ on:
       - 'requirements-desktop*.txt'
       - 'docs/desktop*.md'
       - 'docs/consortium-workflow.md'
+      - 'docs/scisure-integration-review.md'
       - '.github/workflows/desktop.yml'
   workflow_dispatch:
 permissions:

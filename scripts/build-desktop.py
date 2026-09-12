@@ -31,9 +31,11 @@ if sys.platform == 'darwin':
     with zipfile.ZipFile(output, 'a') as archive:
         archive.write(root / 'docs' / 'desktop-quickstart.md', 'READ-ME.md')
         archive.write(root / 'docs' / 'consortium-workflow.md', 'consortium-workflow.md')
+        archive.write(root / 'docs' / 'scisure-integration-review.md', 'scisure-integration-review.md')
 else:
     app = root / 'desktop-dist' / 'CATALYST'
     shutil.copy2(root / 'docs' / 'desktop-quickstart.md', app / 'READ-ME.md')
     shutil.copy2(root / 'docs' / 'consortium-workflow.md', app / 'consortium-workflow.md')
+    shutil.copy2(root / 'docs' / 'scisure-integration-review.md', app / 'scisure-integration-review.md')
     output = shutil.make_archive(str(root / 'desktop-dist' / f'CATALYST-{__version__}-{platform.system()}-{platform.machine()}'), 'zip', root_dir=app.parent, base_dir=app.name)
 print(f'Built {output}')

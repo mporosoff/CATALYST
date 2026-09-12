@@ -19,7 +19,7 @@ from .traceability import lab_id, build_traceability, attach_subject
 MAX_FILE = 20 * 1024 * 1024
 MAX_TOTAL = 40 * 1024 * 1024
 MAX_CELLS = 200_000
-MODALITIES = ('reactor', 'synthesis', 'spectroscopy', 'XRD', 'XAFS/XANES', 'TPR', 'TPD', 'TPO', 'CO uptake', 'computational')
+MODALITIES = ('reactor', 'synthesis', 'spectroscopy', 'XRD', 'XAFS/XANES', 'TPR', 'TPD', 'TPO', 'CO uptake', 'computational', 'imaging')
 FIELDS = {
     'specimen_id': ('text', ('text',)), 'species': ('text', ('text',)),
     'time_s': ('number', ('s', 'min', 'h')),
@@ -57,6 +57,9 @@ COMMON_CONTEXT = {
     'identityNote': 'Identity corrections / source-label notes',
 }
 MODALITY_CONTEXT = {
+    'imaging': {'technique': 'Image type / technique (photo, SEM, TEM, other)',
+        'imageContext': 'What is shown / acquisition instrument and conditions',
+        'scaleReference': 'Scale / calibration reference (or explicitly not quantitative)'},
     'reactor': {'reactorType': 'Reactor configuration', 'temperatureC': 'Temperature (°C)',
         'pressureKpaAbs': 'Absolute pressure (kPa)', 'catalystMassMg': 'Catalyst mass (mg)',
         'intervalMin': 'Injection interval (min)', 'flowBasis': 'Flow reference conditions / composition basis',
@@ -115,7 +118,7 @@ def decimal_text(value):
 
 def convert(value, unit):
     with localcontext() as ctx:
-        ctx.prec = 180
+        ctx.prec = 800  # Covers supported exponent span plus all lexical source digits and offsets.
         factor, offset = CONVERSIONS[unit]
         return decimal_text(number(value) * Decimal(factor) + Decimal(offset))
 
@@ -126,8 +129,16 @@ class Source:
     artifact: dict = field(repr=False)
 
     @classmethod
-    def from_bytes(cls, name, content):
-        artifact = read_artifact(content, name)
+    def from_bytes(cls, name, content, *, parse=True):
+        if parse:
+            artifact = read_artifact(content, name)
+        else:
+            name = str(name).replace('\\', '/').rsplit('/', 1)[-1]
+            if (not name or len(name) > 240 or any(ord(c) < 32 for c in name)
+                    or not content or len(content) > MAX_FILE):
+                raise InputError('Supporting files need a valid filename and 1 byte–20 MiB of content.')
+            artifact = dict(filename=name, sha256=digest(content), size_bytes=len(content), format='binary', sheets={},
+                parser=dict(name='catalyst-opaque', version='1', formulas_executed=False, parsed=False))
         # Preserve lexical JSON decimals in the desktop model, not Python float rounding.
         if artifact['format'] == 'json':
             records = json.loads(content.decode('utf-8-sig'), parse_float=str, parse_int=str)
@@ -140,11 +151,11 @@ class Source:
         return cls(artifact['filename'], bytes(content), artifact)
 
     @classmethod
-    def from_path(cls, path):
+    def from_path(cls, path, *, parse=True):
         path = Path(path)
         with path.open('rb') as stream:
             content = stream.read(MAX_FILE + 1)
-        return cls.from_bytes(path.name, content)
+        return cls.from_bytes(path.name, content, parse=parse)
 
     def metadata(self):
         return {k: self.artifact[k] for k in ('filename', 'sha256', 'size_bytes', 'format', 'parser')}
@@ -152,6 +163,8 @@ class Source:
 def check_sources(sources):
     if not 1 <= len(sources) <= 6 or sum(len(s.content) for s in sources) > MAX_TOTAL:
         raise InputError('Select 1–6 files, at most 20 MiB each and 40 MiB combined.')
+    if any(not s.content or len(s.content) > MAX_FILE for s in sources):
+        raise InputError('Each source must contain 1 byte–20 MiB of content.')
     if len({s.name.casefold() for s in sources}) != len(sources):
         raise InputError('Source filenames must be unique, ignoring letter case.')
     if sum(len(sheet['cells']) for s in sources for sheet in s.artifact['sheets'].values()) > MAX_CELLS:
@@ -240,7 +253,7 @@ def context_issues(context, modality, toolkit=False):
             issues.append(issue('CONTEXT_INVALID_' + key, f'{key} must contain a number in the physical range.'))
     return issues
 
-def build_preview(sources, entity, modality, context, profile=None, source_index=0, toolkit=False):
+def build_preview(sources, entity, modality, context, profile=None, source_index=0, toolkit=False, raw_only=False):
     check_sources(sources)
     entity = lab_id(entity)
     if not entity.strip() or modality not in MODALITIES:
@@ -255,8 +268,17 @@ def build_preview(sources, entity, modality, context, profile=None, source_index
         entity=entity.strip(), modality=modality, context=context, artifacts=[s.metadata() for s in sources],
         normalization={}, scientific_processing={'executed': False}, validation={'version': 'desktop/1', 'issues': issues},
         standardized={'columns': [], 'rows': []})
+    if raw_only:
+        if toolkit:
+            raise InputError('Choose either toolkit import or preserve-only mode.')
+        preview['normalization'] = dict(executed=False, method='preserve-files-with-context/1')
+        preview['data_status'] = 'original_files_only'
+        issues.append(issue('FILES_ONLY', 'Original files and context are preserved. No tabular standardization or scientific interpretation was performed.', 'warning'))
+        return preview
     if toolkit:
-        imported = preview_toolkit_bundle([s.artifact for s in sources], entity, modality)
+        imported = preview_toolkit_bundle([s.artifact for s in sources if s.artifact['format'] != 'binary'], entity, modality)
+        if any(s.artifact['format'] == 'binary' for s in sources):
+            issues.append(issue('OPAQUE_SUPPORTING_FILES', 'Additional native/supporting files are preserved byte-for-byte and are not parsed or executed.', 'warning'))
         # Keep the legacy review untouched. Resolve only specific contextual requirements.
         preview['toolkit_source_review'] = deepcopy(imported)
         for i in imported['issues']:
@@ -306,6 +328,8 @@ def build_preview(sources, entity, modality, context, profile=None, source_index
         issues.append(issue('MAPPING_REQUIRED', 'Create or load an explicit versioned mapping.'))
         return preview
     source = sources[source_index]
+    if source.artifact['format'] == 'binary':
+        raise InputError('Select a CSV/XLSX/flat JSON table for mapping. Native/supporting files are preserved without interpretation.')
     validated = make_profile(**{k: profile[k] for k in ('entity', 'modality', 'source_format', 'source_version', 'name', 'version', 'sheet', 'header_row', 'rules')})
     if (lab_id(profile['entity']), profile['modality'], profile['source_format']) != (entity, modality, source.artifact['format']):
         raise InputError('This mapping belongs to a different partner, modality, or format.')
@@ -325,6 +349,8 @@ def build_preview(sources, entity, modality, context, profile=None, source_index
             try:
                 if 'formula' in cell:
                     raise InputError('Formula cells are not executed; provide an explicit values export.')
+                if cell.get('source_type') == 'e':
+                    raise InputError('Spreadsheet error cells cannot become standardized values or sample labels.')
                 if value is None or value == '':
                     raise InputError('Mapped value is missing; it has not been replaced with zero.')
                 if FIELDS[target][0] == 'text':
@@ -332,7 +358,7 @@ def build_preview(sources, entity, modality, context, profile=None, source_index
                     row[target] = rule['aliases'].get(text, text)
                 else:
                     row[target] = convert(value, rule['unit'])
-                    n = number(row[target])
+                    n = Decimal(row[target])  # Already validated by convert; normalized decimals can exceed the input-text length.
                     if target.endswith('_fraction') and not 0 <= n <= 1:
                         raise InputError('Fraction is outside 0–1; confirm the measurement and basis.')
                     if target in ('mass_g', 'time_s', 'flow_mL_min') and n < 0:
