@@ -1,15 +1,16 @@
 """Bounded direct HTTPS transport. No hosted proxy, redirects, telemetry, or AI."""
 from __future__ import annotations
 
-import json
+from http.client import HTTPException
 import re
 import ssl
 import time
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, urlsplit, unquote
+from urllib.parse import urlencode, urlsplit, unquote, parse_qsl
 from urllib.request import Request, build_opener, HTTPRedirectHandler, HTTPSHandler, ProxyHandler
 
 from .model import encode, MAX_FILE
+from catalyst_ingest.jsonio import strict_loads
 
 SANDBOX = 'https://sandbox.elabjournal.com'
 
@@ -50,10 +51,15 @@ class SciSureClient:
         return f'SciSureClient(origin={self.origin!r}, token=<redacted>)'
 
     def request(self, path, method='GET', data=None, binary=False):
-        parts = urlsplit(path)
+        try:
+            parts = urlsplit(path)
+            decoded = unquote(parts.path)
+        except (ValueError, TypeError, AttributeError):
+            raise SciSureError('Unsupported SciSure operation.') from None
         if (parts.scheme or parts.netloc or parts.fragment or not parts.path.startswith('/api/v1/')
-                or '..' in unquote(parts.path) or '\\' in unquote(parts.path) or any(ord(c) < 32 for c in path)
-                or method not in ('GET', 'POST')):
+                or '..' in decoded or '\\' in decoded or '%' in decoded
+                or any(ord(c) < 32 or ord(c) == 127 for c in path + decoded)
+                or method not in ('GET', 'POST') or (method == 'GET' and data is not None)):
             raise SciSureError('Unsupported SciSure operation.')
         write = method != 'GET'
         headers = {'Authorization': self._token, 'X-Requested-With': 'Swagger',
@@ -97,16 +103,34 @@ class SciSureClient:
                     write and not rejected, status)
             if len(content) > MAX_FILE:
                 raise SciSureError('SciSure response exceeds the supported size.', write)
+            length = response_headers.get('Content-Length', response_headers.get('content-length'))
+            if length is not None and (not str(length).isdigit() or int(length) != len(content)):
+                raise SciSureError('SciSure returned an incomplete response. Check transfer status before retrying.'
+                    if write else 'SciSure returned an incomplete response. Refresh before continuing.', write)
             if binary:
                 return content
-            return json.loads(content.decode('utf-8')) if content else None
+            return strict_loads(content) if content else None
         except SciSureError:
             raise
-        except (OSError, URLError, ValueError, TimeoutError):
+        except (OSError, URLError, ValueError, TimeoutError, HTTPException, RecursionError):
             raise SciSureError('The transfer outcome is unknown. Check transfer status before retrying.' if write
                 else 'SciSure could not be read. Check the connection and try again.', write) from None
 
     def list(self, path):
+        if any(k in ('$page', '$records') for k, _ in parse_qsl(urlsplit(path).query)):
+            raise SciSureError('Pagination parameters are managed by the SciSure client.')
+        route = urlsplit(path).path
+        # A foreign user/group/type ID is shared by many records. Never use it to deduplicate pages.
+        own_key = next((key for pattern, key in (
+            (r'/api/v1/experiments/sections/\d+/files', 'experimentFileID'),
+            (r'/api/v1/experiments/\d+/sections', 'expJournalID'),
+            (r'/api/v1/experiments/\d+/collaborators', 'userID'),
+            (r'/api/v1/sampleTypes/\d+/meta', 'sampleTypeMetaID'),
+            (r'/api/v1/samples/\d+/meta', 'sampleMetaID'),
+            (r'/api/v1/sampleTypes', 'sampleTypeID'), (r'/api/v1/samples', 'sampleID'),
+            (r'/api/v1/experiments', 'experimentID'), (r'/api/v1/projects', 'projectID'),
+            (r'/api/v1/studies', 'studyID'), (r'/api/v1/protocols', 'protVersionID'),
+            (r'/api/v1/users', 'userID')) if re.fullmatch(pattern, route)), None)
         rows, expected_total, page_size, seen = [], None, None, set()
         for page in range(1000):
             response = self.request(path + ('&' if '?' in path else '?') + urlencode({'$page': page, '$records': 100}))
@@ -121,16 +145,15 @@ class SciSureClient:
             if expected_total is None:
                 expected_total, page_size = total, size
             if (total != expected_total or size != page_size or response.get('currentPage', page) != page
+                    or type(response.get('currentPage', page)) is not int
+                    or type(response.get('recordCount', len(data))) is not int
                     or response.get('recordCount', len(data)) != len(data)
                     or len(data) != min(size, max(0, total - page * size))):
                 raise SciSureError('SciSure pagination changed or is incomplete. Refresh before continuing.')
             for item in data:
                 if not isinstance(item, dict):
                     raise SciSureError('SciSure returned an unsupported list record.')
-                # Prefer the record's own ID over mutable fields so page shifts cannot hide a duplicate.
-                id_key = next((k for k in ('experimentFileID', 'expJournalID', 'sampleTypeMetaID', 'sampleID',
-                    'sampleTypeID', 'protVersionID', 'experimentID', 'userID') if k in item), None)
-                fingerprint = encode([id_key, item[id_key]]) if id_key else encode(item)
+                fingerprint = encode([own_key, str(item[own_key])]) if own_key and own_key in item else encode(item)
                 if fingerprint in seen:
                     raise SciSureError('SciSure repeated a paginated record. Refresh before continuing.')
                 seen.add(fingerprint)
@@ -139,25 +162,37 @@ class SciSureClient:
                 return rows
         raise SciSureError('SciSure pagination did not complete.')
 
+    def object(self, path):
+        value = self.request(path)
+        if not isinstance(value, dict):
+            raise SciSureError('SciSure returned an unsupported record. Refresh before continuing.')
+        return value
+
+    def assert_group(self, group_id):
+        if remote_id(self.object('/api/v1/groups/active').get('groupID')) != group_id:
+            raise SciSureError('The token account’s active group changed. Reconnect before continuing.')
+
     def check_connection(self):
-        group = self.request('/api/v1/groups/active')
+        group = self.object('/api/v1/groups/active')
         group_id = remote_id(group.get('groupID'))
         experiments = [e for e in self.list('/api/v1/experiments')
             if e.get('groupID') == group_id and e.get('deleted') is False and e.get('template') is False]
+        self.assert_group(group_id)
         return dict(group_id=group_id, group_name=group.get('name') or group.get('groupName') or str(group_id), experiments=experiments)
 
     def destination(self, experiment_id, group_id=None, writable=True):
         eid = remote_id(experiment_id)
-        active = self.request('/api/v1/groups/active')
+        active = self.object('/api/v1/groups/active')
         current_group = remote_id(active.get('groupID'))
         if group_id is not None and current_group != group_id:
             raise SciSureError('The token account’s active group changed. Verify the destination again.')
-        e = self.request(f'/api/v1/experiments/{eid}')
+        e = self.object(f'/api/v1/experiments/{eid}')
         if (e.get('experimentID') != eid or e.get('groupID') != current_group or e.get('deleted') is not False
                 or e.get('template') is not False):
             raise SciSureError('This experiment is unavailable in the selected group.')
         if writable and e.get('signatureStatus') != 'None':
             raise SciSureError('This experiment is signed or locked. Choose an unsigned test experiment.')
+        self.assert_group(current_group)
         return dict(tenant=self.origin, group_id=current_group, experiment_id=eid,
             study_id=remote_id(e.get('studyID')), project_id=remote_id(e.get('projectID')),
             experiment_name=str(e.get('name', eid)), signature_status=e.get('signatureStatus'))

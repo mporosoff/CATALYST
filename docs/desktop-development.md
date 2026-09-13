@@ -30,6 +30,10 @@ The native Tk GUI uses a single worker thread for parsing/network operations and
 
 ## Tests and builds
 
+The 0.7 audit adds `contracts.py` for bounded saved-review/approval/source bindings and `jsonio.py` for unambiguous JSON. Sources detect parsed-artifact mutation; Excel date/percentage meaning and hidden/merged content are surfaced explicitly. GC conversion uses an isolated decimal context and compares embedded numeric evidence without float rounding. The catalog validates preexisting lineage conflicts and rechecks its active group. `tests/test_robustness.py` exercises malformed packets, corruption, HTTP interruptions, wrong native IDs, scientific/context boundaries and stale state. See [the current audit](scisure-integration-review.md).
+
+Before building, update the isolated installer with `python -m pip install --upgrade pip==26.2.1`. After installing the build requirements, run `python scripts/audit-desktop-dependencies.py`; it checks public installed distribution names/versions against PyPI and writes an ignored report. It is never imported by the desktop runtime. CI blocks packaging on a vulnerable or incompletely checked dependency set and retains its report in build artifacts.
+
 - `python -m unittest discover -s tests -v`: synthetic scientific boundaries, source precision/preservation, native transport security, approval, upload/read-back, corruption, and lost-response recovery. No live credentials or research data.
 - `python scripts/test-desktop-gui.py`: real wheel events over fields/selectors, high-resolution wheel accumulation, minimum-window layout, dynamically rebuilt context, native result scrolling delegation, mapping disclosure, persistent review action, release link, schema plan/application, selection, mapping, preview, approval, and invalidation. No network or credential store calls.
 - `python -m pip install -r requirements-desktop-build.txt` then `python scripts/build-desktop.py`: package on the target operating system. Outputs go to ignored `desktop-dist/`; only code, Python dependencies, and public mapping definitions are included.

@@ -1,13 +1,13 @@
 """Import numerical toolkit outputs with their source evidence; never recalculate GC data."""
 
 from collections import Counter
-from decimal import Decimal
+from decimal import Decimal, localcontext
 import hashlib
 import json
 import re
 
 from .preview import PROFILE_ROOT, _decimal, _issue, _location, _role
-from .readers import InputError, col_name, coordinate_parts
+from .readers import InputError, col_name, coordinate_parts, MAX_ROWS
 
 
 def _table(artifact):
@@ -46,13 +46,26 @@ def _numeric(value, *, optional=False):
 
 def _integer(value):
     number = _numeric(value)
-    if number != number.to_integral_value() or number < 0:
-        raise InputError('Toolkit counts and injection limits must be nonnegative integers.')
+    if number != number.to_integral_value() or not 0 <= number <= MAX_ROWS:
+        raise InputError('Toolkit counts and injection limits must be integers within the supported row limit.')
     return int(number)
+
+
+def _cell_evidence(cell):
+    value = cell.get('value')
+    if cell.get('source_type') == 'n' and cell.get('lexical_value') is not None:
+        return 'number', Decimal(cell['lexical_value'])
+    return type(value).__name__, value
 
 
 def preview_toolkit_bundle(artifacts, entity, modality):
     """Require an explicit bundle import; filenames alone never establish a match."""
+    with localcontext() as context:
+        context.prec = 800
+        return _preview_toolkit_bundle(artifacts, entity, modality)
+
+
+def _preview_toolkit_bundle(artifacts, entity, modality):
     content = (PROFILE_ROOT / 'university-of-rochester/reactor/toolkit-gc-bundle-v1.json').read_bytes()
     profile = json.loads(content)
     if entity != profile['entity'] or modality != profile['modality']:
@@ -68,6 +81,12 @@ def preview_toolkit_bundle(artifacts, entity, modality):
     if len(records) != 1 or not set(profile['summary_required']).issubset(summary_columns):
         raise InputError('Toolkit summary must contain one run and the supported versioned fields.')
     summary = records[0][1]
+    for key in ('catalyst_mass_mg', 'injection_interval_min', 'space_velocity_reference_temperature_K',
+            'space_velocity_reference_pressure_atm'):
+        if _numeric(summary[key]) <= 0:
+            raise InputError('Toolkit mass, injection interval and gas reference conditions must be positive, explicit numbers.')
+    if any(_numeric(summary[k]) < 0 for k in ('inlet_Ar_sccm', 'inlet_CO2_sccm', 'inlet_H2_sccm')):
+        raise InputError('Declared inlet gas flows cannot be negative.')
     if summary['reaction_type'] not in profile['supported_reactions']:
         raise InputError('This draft toolkit profile supports RWGS; other methods need their own reviewed profile.')
     prefix = summary['output_prefix']
@@ -92,7 +111,9 @@ def preview_toolkit_bundle(artifacts, entity, modality):
     source_cells = candidates[0]['cells']
     original_values = {a: c['value'] for a, c in source_cells.items() if c.get('value') is not None}
     embedded_values = {a: c['value'] for a, c in embedded.items() if c.get('value') is not None}
-    raw_matches = original_values == embedded_values and not any('formula' in c for c in source_cells.values())
+    raw_matches = ({a: _cell_evidence(c) for a, c in source_cells.items() if c.get('value') is not None}
+        == {a: _cell_evidence(c) for a, c in embedded.items() if c.get('value') is not None}
+        and not any('formula' in c for c in source_cells.values()))
     if not raw_matches:
         issues.append(_issue('EMBEDDED_RAW_MISMATCH', 'Embedded raw values differ from the supplied original report.', 'error'))
     raw_labels = [value for address, value in sorted(original_values.items(), key=lambda x: coordinate_parts(x[0]))

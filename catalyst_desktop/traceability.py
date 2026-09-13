@@ -87,6 +87,12 @@ def trace_context(modality):
     return TRACE_COMMON | (COMPUTATIONAL_CONTEXT if modality == 'computational' else PHYSICAL_CONTEXT)
 
 
+def date_value(value):
+    if not isinstance(value, str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}', value):
+        raise ValueError('Use YYYY-MM-DD.')
+    return datetime.strptime(value, '%Y-%m-%d')
+
+
 def build_traceability(entity, modality, context):
     """Return structured declarations plus blocking issues for incomplete identity context."""
     issues = []
@@ -159,7 +165,7 @@ def build_traceability(entity, modality, context):
                 error('SELF_PARENT', 'A sample cannot be its own parent.')
         synthesized = required('synthesizedAt')
         try:
-            if datetime.strptime(synthesized, '%Y-%m-%d') > datetime.strptime(context.get('acquiredAt', ''), '%Y-%m-%d'):
+            if date_value(synthesized) > date_value(context.get('acquiredAt', '')):
                 error('SYNTHESIS_DATE', 'Synthesis cannot be later than this acquisition.')
         except ValueError:
             error('SYNTHESIS_DATE', 'Synthesis and acquisition dates must use YYYY-MM-DD.')
@@ -181,10 +187,12 @@ def build_traceability(entity, modality, context):
             if sender == acq:
                 error('CUSTODY_LABS', 'Sending and receiving laboratories must differ.')
             try:
-                receipt_date = datetime.strptime(received, '%Y-%m-%d')
-                acquisition_date = datetime.strptime(context.get('acquiredAt', ''), '%Y-%m-%d')
+                receipt_date = date_value(received)
+                acquisition_date = date_value(context.get('acquiredAt', ''))
                 if receipt_date > acquisition_date:
                     error('CUSTODY_DATE', 'The sample cannot be received after this acquisition.')
+                if receipt_date < date_value(synthesized):
+                    error('CUSTODY_DATE', 'The sample cannot be received before its batch was synthesized.')
             except ValueError:
                 error('CUSTODY_DATE', 'Receipt and acquisition dates must use YYYY-MM-DD.')
             moved_id = context.get('custodySampleId') or sid
@@ -203,8 +211,8 @@ def attach_subject(preview):
     aliases = {a['local_label'] for a in trace['aliases'] if a['lab'] == trace['source_lab']}
     mismatches = []
     for row in preview['standardized'].get('rows', []):
-        supplied = row.get('specimen_id') or row.get('model_id')
-        if supplied is not None and supplied != sid and supplied not in aliases:
+        supplied = [row.get('specimen_id'), row.get('model_id')]
+        if any(value is not None and value != sid and value not in aliases for value in supplied):
             mismatches.append(row.get('source_row', '?'))
         row['canonical_subject_id'] = sid
         row['canonical_dataset_id'] = trace['dataset']['id']

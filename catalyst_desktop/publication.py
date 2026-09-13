@@ -1,11 +1,13 @@
 """Approved, checksum-verified transfers and read-back, stored only in SciSure."""
 from __future__ import annotations
 
-import json
+import re
 from urllib.parse import quote
 
 from .model import Revision, Source, InputError, encode, digest, now, MAX_FILE, check_sources
 from .scisure import SciSureError, remote_id
+from .contracts import approved_payload
+from catalyst_ingest.jsonio import strict_loads
 
 PREFIX = 'CATALYST desktop | '
 MANIFEST = 'catalyst-review.json'
@@ -22,13 +24,30 @@ def unique(rows, key):
     return remote_id(rows[0][key]) if rows else None
 
 def validate_approval(revision, approval):
-    payload = revision.value()
-    if (not isinstance(approval, dict) or approval.get('revision_id') != payload['id']
-            or approval.get('revision_sha256') != revision.sha256 or approval.get('acknowledged') is not True
-            or not approval.get('reviewer') or not approval.get('note')
-            or any(i['severity'] == 'error' for i in payload['preview']['validation']['issues'])):
-        raise InputError('This exact revision must be approved before transfer.')
-    return payload
+    return approved_payload(revision, approval)
+
+
+def file_metadata(metadata, size=None, checksum=None, experiment=None):
+    if type(metadata.get('fileSize')) is not int or not 1 <= metadata['fileSize'] <= MAX_FILE:
+        raise SciSureError('A SciSure file has an unsupported size. Transfer is paused.')
+    if size is not None and metadata['fileSize'] != size:
+        raise SciSureError('A SciSure file size differs from the approved original. Transfer is paused.')
+    if experiment is not None and metadata.get('experimentID', experiment) != experiment:
+        raise SciSureError('SciSure returned a file from another experiment. Transfer is paused.')
+    declared = metadata.get('SHA256Hash')
+    # The API does not promise a hash encoding. Compare it only when it is a SHA-256 hex digest.
+    if checksum and isinstance(declared, str) and re.fullmatch(r'[0-9a-fA-F]{64}', declared) and declared.lower() != checksum:
+        raise SciSureError('SciSure file metadata reports a different checksum. Transfer is paused.')
+
+
+def download(client, base, metadata, *, size=None, checksum=None, experiment=None):
+    require_tenant_file(metadata)
+    file_metadata(metadata, size, checksum, experiment)
+    content = client.request(f'{base}/{remote_id(metadata.get("experimentFileID"))}', binary=True)
+    if len(content) != metadata['fileSize'] or (checksum and digest(content) != checksum):
+        raise SciSureError('A downloaded file failed its size or checksum integrity check.')
+    file_metadata(metadata, len(content), digest(content), experiment)
+    return content
 
 class Publisher:
     def __init__(self, client, destination, operations=None):
@@ -62,9 +81,20 @@ class Publisher:
     def _section(self, revision_id):
         path = f'/api/v1/experiments/{self.destination["experiment_id"]}/sections'
         heading = PREFIX + revision_id
-        return self._step('section/' + revision_id,
-            lambda: unique([s for s in self.client.list(path) if s.get('sectionHeader') == heading
-                and s.get('sectionType') in FILE_SECTION_TYPES and not s.get('deleted')], 'expJournalID'),
+        def find():
+            matches = {}
+            for query in (path, path + '?archived=true'):
+                for section in self.client.list(query):
+                    if section.get('sectionHeader') != heading:
+                        continue
+                    if section.get('deleted') is not False or section.get('sectionType') not in FILE_SECTION_TYPES:
+                        raise SciSureError('An archived or changed section already reserves this revision. Reconcile it in SciSure.')
+                    sid = remote_id(section.get('expJournalID'))
+                    if sid in matches and matches[sid] != section:
+                        raise SciSureError('The revision section changed during verification. Refresh before continuing.')
+                    matches[sid] = section
+            return unique(list(matches.values()), 'expJournalID')
+        return self._step('section/' + revision_id, find,
             lambda: self.client.request(path, 'POST', {'sectionType': 'FILE', 'sectionHeader': heading}))
 
     def _file(self, section, filename, data):
@@ -75,11 +105,7 @@ class Publisher:
             identifier = unique(rows, 'experimentFileID')
             if identifier is None:
                 return None
-            require_tenant_file(rows[0])
-            if rows[0].get('fileSize') != len(data):
-                raise SciSureError('An existing SciSure file has a different size. Transfer is paused.')
-            if digest(self.client.request(f'{path}/{identifier}', binary=True)) != expected:
-                raise SciSureError('An existing SciSure file has a different checksum. Transfer is paused.')
+            download(self.client, path, rows[0], size=len(data), checksum=expected, experiment=self.destination['experiment_id'])
             return identifier
         return self._step(f'file/{section}/{filename}', find,
             lambda: self.client.request(path + '?fileName=' + quote(filename, safe=''), 'POST', data))
@@ -103,6 +129,10 @@ class Publisher:
         progress('Checking sample, procedure, and dataset identities across the active SciSure group…')
         catalog = load_catalog(self.client, self.destination['group_id'], progress)
         check_publication(trace, catalog)
+        for entry in catalog['entries'] + catalog['pending']:
+            if entry['revision_id'] == payload['id'] and (entry['destination']['experiment_id'] != self.destination['experiment_id']
+                    or entry['revision_sha256'] != revision.sha256):
+                raise InputError('This revision ID already belongs to another destination or different content. Create a new reviewed revision.')
         # Detect accidental reuse of a profile version with different rules anywhere in the active group.
         profile = payload['preview']['normalization'].get('profile', {})
         if profile.get('format') == 'catalyst-mapping/1':
@@ -140,7 +170,7 @@ def history(client, destination):
     results = []
     for s in sections:
         heading = s.get('sectionHeader', '')
-        if not heading.startswith(PREFIX) or s.get('sectionType') not in FILE_SECTION_TYPES or s.get('deleted'):
+        if not isinstance(heading, str) or not heading.startswith(PREFIX) or s.get('sectionType') not in FILE_SECTION_TYPES or s.get('deleted'):
             continue
         sid = remote_id(s['expJournalID'])
         files = client.list(f'/api/v1/experiments/sections/{sid}/files')
@@ -154,7 +184,7 @@ def read_review(client, destination, section_id, with_sources=False):
     client.verify_destination(destination, writable=False)
     sid = remote_id(section_id)
     sections = client.list(f'/api/v1/experiments/{destination["experiment_id"]}/sections')
-    selected = [s for s in sections if s.get('expJournalID') == sid and s.get('sectionHeader', '').startswith(PREFIX)
+    selected = [s for s in sections if s.get('expJournalID') == sid and isinstance(s.get('sectionHeader'), str) and s['sectionHeader'].startswith(PREFIX)
             and s.get('sectionType') in FILE_SECTION_TYPES and not s.get('deleted')]
     if len(selected) != 1:
         raise SciSureError('The selected review does not belong to this experiment.')
@@ -163,9 +193,10 @@ def read_review(client, destination, section_id, with_sources=False):
     mid = unique([f for f in files if f.get('realName') == MANIFEST], 'experimentFileID')
     if mid is None:
         raise SciSureError('The review file is missing from this incomplete transfer.')
-    require_tenant_file(next(f for f in files if f.get('experimentFileID') == mid))
     try:
-        packet = json.loads(client.request(f'{base}/{mid}', binary=True))
+        packet = strict_loads(download(client, base, next(f for f in files if f.get('experimentFileID') == mid), experiment=destination['experiment_id']))
+        if not isinstance(packet, dict):
+            raise ValueError
         if packet.get('format') != 'catalyst-desktop-transfer/1' or packet.get('state') != 'prepared':
             raise ValueError
         revision = Revision(encode(packet['revision']), packet['revision_sha256'])
@@ -174,7 +205,7 @@ def read_review(client, destination, section_id, with_sources=False):
             raise ValueError
         if any(packet['destination'][k] != destination[k] for k in ('tenant', 'group_id', 'experiment_id', 'study_id', 'project_id')):
             raise ValueError
-    except (ValueError, TypeError, KeyError):
+    except (ValueError, TypeError, KeyError, AttributeError):
         raise SciSureError('The stored review failed its format or integrity checks.') from None
     sources = []
     rid = unique([f for f in files if f.get('realName') == RECEIPT], 'experimentFileID')
@@ -182,22 +213,26 @@ def read_review(client, destination, section_id, with_sources=False):
     if rid:
         require_tenant_file(next(f for f in files if f.get('experimentFileID') == rid))
         try:
-            receipt = json.loads(client.request(f'{base}/{rid}', binary=True))
-            if (receipt.get('format') != 'catalyst-desktop-receipt/1' or receipt.get('state') != 'complete'
+            receipt = strict_loads(download(client, base, next(f for f in files if f.get('experimentFileID') == rid), experiment=destination['experiment_id']))
+            if (not isinstance(receipt, dict) or receipt.get('format') != 'catalyst-desktop-receipt/1' or receipt.get('state') != 'complete'
                     or receipt.get('revision_sha256') != revision.sha256 or receipt.get('revision_id') != revision.value()['id']
                     or receipt.get('section_id') != sid or receipt.get('manifest_id') != mid
                     or receipt.get('destination') != packet['destination']):
                 raise ValueError
             expected_files = revision.value()['preview']['artifacts']
-            if len(receipt.get('files', [])) != len(expected_files):
+            if not isinstance(receipt.get('files'), list) or len(receipt['files']) != len(expected_files):
                 raise ValueError
             for i, (expected, actual) in enumerate(zip(expected_files, receipt['files']), 1):
+                matching = [f for f in files if f.get('realName') == f'{i:02d}-' + expected['filename']]
+                if not isinstance(actual, dict) or unique(matching, 'experimentFileID') != remote_id(actual.get('file_id')):
+                    raise ValueError
+                file_metadata(matching[0], expected['size_bytes'], expected['sha256'], destination['experiment_id'])
                 if (actual['source_name'] != expected['filename'] or actual['sha256'] != expected['sha256']
                         or actual['size_bytes'] != expected['size_bytes'] or actual['remote_name'] != f'{i:02d}-' + expected['filename']
                         or not any(f.get('experimentFileID') == actual['file_id'] and f.get('realName') == actual['remote_name']
                             and f.get('fileSize') == actual['size_bytes'] for f in files)):
                     raise ValueError
-        except (ValueError, TypeError, KeyError):
+        except (ValueError, TypeError, KeyError, AttributeError):
             raise SciSureError('The transfer receipt does not match the stored review and files.') from None
     if with_sources:
         for i, metadata in enumerate(revision.value()['preview']['artifacts'], 1):
@@ -205,11 +240,11 @@ def read_review(client, destination, section_id, with_sources=False):
             fid = unique([f for f in files if f.get('realName') == name], 'experimentFileID')
             if fid is None:
                 raise SciSureError('An original is missing from this incomplete transfer. If the original app session is still open, use Send / check transfer there. Otherwise reconcile the incomplete record in SciSure before starting a new revision.')
-            require_tenant_file(next(f for f in files if f.get('experimentFileID') == fid))
-            content = client.request(f'{base}/{fid}', binary=True)
-            if len(content) != metadata['size_bytes'] or digest(content) != metadata['sha256']:
-                raise SciSureError('A downloaded original does not match its recorded checksum.')
+            content = download(client, base, next(f for f in files if f.get('experimentFileID') == fid),
+                size=metadata['size_bytes'], checksum=metadata['sha256'], experiment=destination['experiment_id'])
             sources.append(Source.from_bytes(metadata['filename'], content, parse=metadata.get('format') != 'binary'))
-        check_sources(sources)
+            check_sources(sources)
+    client.verify_destination(destination, writable=False)
     return dict(revision=revision, approval=packet['approval'], destination=packet['destination'],
-        sources=sources, receipt=receipt, state='complete' if receipt else 'incomplete')
+        sources=sources, receipt=receipt, state='complete' if receipt else 'incomplete',
+        integrity='original checksums verified' if with_sources else 'review and receipt metadata checked; original bytes not downloaded')

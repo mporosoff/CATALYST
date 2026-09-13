@@ -269,10 +269,28 @@ with patch('tkinter.messagebox.showerror', side_effect=lambda *a, **kw: errors.a
     finish(app)
     assert schema_api.native_posts == 17
     assert 'Native material schema verified' in app.status.get()
+    # Failed sign-in cannot leave a stale connected indicator, experiment, or remote preview.
+    app.show_text(app.remote_text, 'Synthetic previous account record')
+    app.token.set('synthetic-token')
+    with patch('catalyst_desktop.gui.SciSureClient', return_value=client_for(lambda *_: (401, b''))):
+        app.connect()
+        finish(app)
+    assert app.client is None and app.group_id is None and app.experiments == []
+    assert 'not verified' in app.connection_status.get()
+    assert 'previous account record' not in app.remote_text.get('1.0', 'end')
+    assert len(errors) == 1 and 'HTTP 401' in errors[0][1], str(errors)
+    errors.pop()  # The deliberately rejected sign-in is the only expected error.
+    with patch('catalyst_desktop.gui.forget_token') as removed:
+        app.forget()
+        finish(app)
+        removed.assert_called_once()
+    assert app.experiment.get() == '' and app.group_id is None
+    assert app.connection_status.get() == 'Disconnected.'
+    assert app.transfer_operations, 'Disconnecting must retain uncertain-write guards'
     app.new_submission(ask=False)
     assert app.review_empty.winfo_manager() == 'pack' and app.review_content.winfo_manager() == ''
     assert not app.context_section.opened and not app.mapping_section.opened
     assert app.review_button.instate(['disabled'])
     assert not errors, str(errors)
     app.close()
-print('Native GUI smoke passed: wheel events, compact forms, mapping disclosure, persistent review action, release link, tables, images, approval, lineage, schema review/application, and reconnect guards. No network calls.')
+print('Native GUI smoke passed: scrolling, mapping, files, approval, lineage, schema review/application, reconnect guards, rejected sign-in, and cleared disconnected state. No network calls.')

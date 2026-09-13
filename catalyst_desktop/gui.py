@@ -13,10 +13,11 @@ from tkinter import ttk, filedialog, messagebox
 from . import __version__
 from .design import apply_theme, Card, page_heading, section_navigation, icon, PAPER, INK, MUTED, GREEN, SIDEBAR, LINE
 from .model import (Source, Revision, InputError, MODALITIES, COMMON_CONTEXT, MODALITY_CONTEXT,
-    FIELDS, build_preview, make_profile, table, check_sources)
+    FIELDS, build_preview, make_profile, table, check_sources, load_sources)
 from .scisure import SciSureClient, SciSureError, SANDBOX, remote_id
 from .credentials import load_token, save_token, forget_token, CredentialError
-from .publication import Publisher, history, read_review
+from .publication import Publisher, history, read_review, download
+from catalyst_ingest.jsonio import strict_loads
 from .traceability import (LAB_CHOICES, MATERIAL_KINDS, MODEL_RELATIONS, PHYSICAL_CONTEXT,
     COMPUTATIONAL_CONTEXT, lab_id, lab_name, new_id, trace_context)
 from .catalog import load_catalog, search_catalog
@@ -210,7 +211,7 @@ class Application:
         parent.columnconfigure(1, weight=1)
         return widget
 
-    def run(self, description, work, done):
+    def run(self, description, work, done, failed=None):
         if self.busy:
             messagebox.showinfo('CATALYST', 'Wait for the current operation to finish.', parent=self.root)
             return
@@ -226,7 +227,7 @@ class Application:
         self.status.set(description)
         self.root.configure(cursor='watch')
         future = self.executor.submit(work)
-        future.add_done_callback(lambda f: self.messages.put(('result', f, done)))
+        future.add_done_callback(lambda f: self.messages.put(('result', f, done, failed)))
 
     def poll(self):
         try:
@@ -235,7 +236,7 @@ class Application:
                 if message[0] == 'progress':
                     self.status.set(message[1])
                     continue
-                _, future, done = message
+                _, future, done, failed = message
                 self.busy = False
                 for widget, state in self.locked_widgets:
                     if widget.winfo_exists():
@@ -247,9 +248,11 @@ class Application:
                     result = future.result()
                     done(result)
                 except (InputError, SciSureError, CredentialError) as e:
+                    if failed: failed()
                     self.status.set(str(e))
                     messagebox.showerror('CATALYST — action paused', str(e), parent=self.root)
                 except Exception:
+                    if failed: failed()
                     self.status.set('The operation could not be completed. Your review remains in memory.')
                     messagebox.showerror('CATALYST', 'The operation could not be completed. No raw error or credential was logged.', parent=self.root)
         except queue.Empty:
@@ -373,6 +376,7 @@ class Application:
         self.clear_destination()
         self.connection_status.set('Connecting to the SciSure sandbox…')
         self.client = None
+        self.group_id = None
         self.experiments = []
         self.experiment.configure(values=[])
         self.experiment.set('')
@@ -381,7 +385,7 @@ class Application:
             connection = client.check_connection()
             warning = None
             if remember:
-                try: save_token(SANDBOX, token)
+                try: save_token(SANDBOX, token.strip())
                 except CredentialError as e: warning = str(e)
             return client, connection, warning
         def done(result):
@@ -392,7 +396,8 @@ class Application:
             self.token.set('')
             self.connection_status.set(f'Connected to {connection["group_name"]} (group {self.group_id}). {len(self.experiments)} experiments available.')
             self.status.set(warning or 'Connection verified. Select an experiment and verify it before sending data.')
-        self.run('Checking the SciSure connection…', work, done)
+        self.run('Checking the SciSure connection…', work, done,
+            lambda: self.connection_status.set('Connection not verified. Check the token and connection, then try again.'))
 
     def use_saved_token(self):
         def done(token):
@@ -408,6 +413,10 @@ class Application:
             return
         self.token.set('')
         self.client = None
+        self.group_id = None
+        self.experiments = []
+        self.experiment.configure(values=[])
+        self.experiment.set('')
         self.clear_destination()
         self.connection_status.set('Disconnected.')
         self.run('Removing the saved token…', lambda: forget_token(SANDBOX),
@@ -419,6 +428,7 @@ class Application:
         self.history_rows = []
         self.remote_files = []
         self.loaded_review = None
+        self.history_destination = self.files_destination = None
         self.catalog = None
         self.catalog_rows = []
         if hasattr(self, 'catalog_table'):
@@ -428,6 +438,10 @@ class Application:
             self.file_table.delete(*self.file_table.get_children())
         if hasattr(self, 'destination_status'):
             self.destination_status.set('No destination verified.')
+        if hasattr(self, 'remote_text'):
+            self.show_text(self.remote_text, 'Select and verify a SciSure destination to read its records.')
+        if hasattr(self, 'catalog_status'):
+            self.catalog_status.set('Refresh the catalog for the current connection. No catalog is cached on disk.')
 
     def selected_destination(self, writable=True):
         index = self.experiment.current()
@@ -620,9 +634,7 @@ class Application:
             messagebox.showerror('CATALYST', 'Select no more than six files.', parent=self.root)
             return
         def work():
-            sources = [Source.from_path(p, parse=Path(p).suffix.lower() in ('.csv', '.xlsx', '.json')) for p in paths]
-            check_sources(sources)
-            return sources
+            return load_sources(paths)
         def done(sources):
             self.raw_only.set(all(s.artifact['format'] == 'binary' for s in sources))
             if self.raw_only.get():
@@ -679,9 +691,7 @@ class Application:
         sheet = self.sheet_choice.get()
         draft = {name: (target.get(), unit.get(), aliases.get()) for name, target, unit, aliases in self.rules}
         def work():
-            result = [*current, *(Source.from_path(path, parse=False) for path in paths)]
-            check_sources(result)
-            return result
+            return load_sources(paths, current, parse_tables=False)
         def done(sources):
             if all(s.artifact['format'] == 'binary' for s in sources):
                 self.toolkit.set(False)
@@ -760,7 +770,7 @@ class Application:
         for source, target, unit, aliases in self.rules:
             if target.get() == 'Ignore':
                 continue
-            try: names = json.loads(aliases.get()) if aliases.get().strip() else {}
+            try: names = strict_loads(aliases.get(), max_bytes=1024 * 1024) if aliases.get().strip() else {}
             except ValueError: raise InputError('Name aliases must be JSON such as {"CO2": "carbon dioxide"}.') from None
             rules.append(dict(source=source, target=target.get(), unit=unit.get(), aliases=names))
         try:
@@ -993,6 +1003,7 @@ class Application:
             self.filter_catalog()
             self.catalog_status.set(f'{len(catalog["entries"])} completed reviews scanned; '
                 f'{len(catalog["pending"])} incomplete transfers excluded from selection; '
+                f'{len(catalog.get("orphan_sections", []))} sections have no review manifest; '
                 f'{catalog["legacy_reviews"]} older reviews need identity registration. Scope: active group {group}.')
         self.run('Reading the shared identity catalog from SciSure…', lambda: load_catalog(client, group,
             lambda message: self.messages.put(('progress', message))), done)
@@ -1166,7 +1177,7 @@ class Application:
             self.loaded_review = loaded
             self.library_sections.select(self.library_detail)
             self.show_text(self.remote_text, json.dumps(loaded['revision'].value(), indent=2, ensure_ascii=False)[:500000])
-            self.status.set('Review loaded into memory. ' + ('Original checksums verified.' if with_sources else 'Original files were not downloaded.'))
+            self.status.set('Review loaded into memory. ' + loaded['integrity'] + '.')
         self.run('Reading the saved review' + (' and original files…' if with_sources else '…'),
             lambda: read_review(client, destination, row['section_id'], with_sources), done)
 
@@ -1222,7 +1233,10 @@ class Application:
                     continue
                 sid = remote_id(section['expJournalID'])
                 for file in client.list(f'/api/v1/experiments/sections/{sid}/files'):
-                    result.append(dict(file, section_id=sid, section_name=section.get('sectionHeader', str(sid))))
+                    result.append(dict(file, section_id=sid, section_name=section.get('sectionHeader') or str(sid)))
+                    if len(result) > 1000:
+                        raise SciSureError('More than 1,000 attachments are visible. Choose a narrower experiment; no partial file list will be shown.')
+            client.verify_destination(destination, writable=False)
             return destination, sorted(result, key=lambda f: remote_id(f['experimentFileID']), reverse=True)
         def done(result):
             self.files_destination, self.remote_files = result
@@ -1240,11 +1254,12 @@ class Application:
         client, destination = self.client, dict(self.files_destination)
         def work():
             client.verify_destination(destination, writable=False)
-            if f.get('origin') == 'ONSITE':
-                raise InputError('This file uses eLABHybrid institutional storage. Open it in SciSure; this app contacts only the verified SciSure tenant.')
-            content = client.request(f'/api/v1/experiments/sections/{f["section_id"]}/files/{remote_id(f["experimentFileID"])}', binary=True)
-            if len(content) != f.get('fileSize'):
-                raise InputError('Downloaded file size differs from SciSure metadata.')
+            base = f'/api/v1/experiments/sections/{f["section_id"]}/files'
+            current = [item for item in client.list(base) if item.get('experimentFileID') == f['experimentFileID']]
+            if len(current) != 1 or current[0].get('realName') != f.get('realName'):
+                raise InputError('The selected attachment changed or is missing. Refresh the file list.')
+            content = download(client, base, current[0], size=f.get('fileSize'), experiment=destination['experiment_id'])
+            client.verify_destination(destination, writable=False)
             name = str(f.get('realName', 'file'))
             if name.lower().endswith(('.csv', '.xlsx', '.json')):
                 try:
@@ -1252,7 +1267,8 @@ class Application:
                     return json.dumps(source.artifact, indent=2, ensure_ascii=False)[:500000]
                 except InputError:
                     if name.lower().endswith('.json'):
-                        return json.dumps(json.loads(content), indent=2, ensure_ascii=False)[:500000]
+                        try: return json.dumps(strict_loads(content), indent=2, ensure_ascii=False)[:500000]
+                        except ValueError: raise InputError('This JSON file is malformed or exceeds the supported limits.') from None
                     raise
             return f'{name}\n{len(content):,} bytes received into memory. This file type has no desktop preview.'
         self.run('Reading the selected file from SciSure…', work,

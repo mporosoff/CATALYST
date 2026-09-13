@@ -29,11 +29,11 @@ def _issue(code, message, severity='warning', locations=None, **extra):
 def _decimal(value):
     if isinstance(value, bool) or value is None:
         return None
-    if isinstance(value, str) and not re.fullmatch(r'[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?', value):
+    if len(str(value)) > 128 or not re.fullmatch(r'[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?', str(value)):
         return None
     try:
         number = Decimal(str(value))
-        return str(number) if number.is_finite() else None
+        return str(number) if number.is_finite() and abs(number.adjusted()) <= 300 else None
     except InvalidOperation:
         return None
 

@@ -12,6 +12,7 @@ def load_catalog(client, group_id, progress=lambda _: None):
     if connection['group_id'] != group_id:
         raise SciSureError('The active group changed. Reconnect before reading the sample catalog.')
     entries, pending, profiles, legacy, count = [], [], [], 0, 0
+    revisions, orphan_sections = {}, []
     for experiment in connection['experiments']:
         progress('Reading sample identities from SciSure experiment ' + str(experiment['experimentID']) + '…')
         destination = client.destination(experiment['experimentID'], group_id, writable=False)
@@ -20,9 +21,14 @@ def load_catalog(client, group_id, progress=lambda _: None):
             if count > MAX_REVIEWS:
                 raise SciSureError('The active group exceeds this release’s 250-review catalog limit. No partial catalog will be used for publication.')
             if not item['manifest_id']:
+                orphan_sections.append(dict(item, destination=destination))
                 continue
             loaded = read_review(client, destination, item['section_id'])
-            preview = loaded['revision'].value()['preview']
+            payload = loaded['revision'].value()
+            if payload['id'] in revisions:
+                raise SciSureError('A revision appears in more than one SciSure section. Reconcile the duplicate before catalog reuse.')
+            revisions[payload['id']] = loaded['revision'].sha256
+            preview = payload['preview']
             profiles.append(preview['normalization'].get('profile', {}))
             trace = preview.get('traceability')
             if not trace:
@@ -33,7 +39,7 @@ def load_catalog(client, group_id, progress=lambda _: None):
                 raise SciSureError('A saved traceability declaration is inconsistent with its approved context.')
             entry = dict(trace=trace, context=preview['context'], destination=destination,
                 profile=preview['normalization'].get('profile', {}),
-                revision_id=loaded['revision'].value()['id'], section_id=item['section_id'])
+                revision_id=payload['id'], revision_sha256=loaded['revision'].sha256, section_id=item['section_id'])
             (entries if loaded['state'] == 'complete' else pending).append(entry)
     # Fail on conflicting definitions already in the catalog, before offering them for reuse.
     saved = []
@@ -44,7 +50,15 @@ def load_catalog(client, group_id, progress=lambda _: None):
             if any(key in previous and previous[key] != value for key, value in records.items()):
                 raise SciSureError('Conflicting saved identities require review in SciSure before catalog reuse.')
         saved.append(entry['trace'])
-    return dict(entries=entries, pending=pending, profiles=profiles, legacy_reviews=legacy)
+    complete = [e['trace'] for e in entries]
+    try:
+        for entry in entries + pending:
+            validate_catalog(entry['trace'], complete)
+            validate_catalog(entry['trace'], saved)
+    except InputError:
+        raise SciSureError('Saved sample lineage, root identities, or shared procedure versions conflict or have missing completed references. Reconcile them in SciSure.') from None
+    client.assert_group(group_id)
+    return dict(entries=entries, pending=pending, profiles=profiles, legacy_reviews=legacy, orphan_sections=orphan_sections)
 
 
 def check_publication(trace, catalog):

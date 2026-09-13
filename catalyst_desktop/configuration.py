@@ -89,7 +89,13 @@ def _type(client):
     matches = [t for t in records.values() if str(t.get('name') or '').casefold() == TYPE_NAME.casefold()]
     if len(matches) > 1:
         raise InputError('Duplicate CATALYST material types exist. Resolve their identity in SciSure before configuration.')
-    return client.request(f'/api/v1/sampleTypes/{remote_id(matches[0]["sampleTypeID"])}') if matches else None
+    if not matches:
+        return None
+    sid = remote_id(matches[0]['sampleTypeID'])
+    detail = client.object(f'/api/v1/sampleTypes/{sid}')
+    if detail.get('sampleTypeID') != sid:
+        raise SciSureError('SciSure returned a different sample type than requested. Configuration is paused.')
+    return detail
 
 
 def _type_conflicts(actual, group_id):

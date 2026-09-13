@@ -30,7 +30,11 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install credential and packaging libraries
-        run: python -m pip install -r requirements-desktop-build.txt
+        run: |
+          python -m pip install --upgrade pip==26.2.1
+          python -m pip install -r requirements-desktop-build.txt
+      - name: Check published dependency advisories
+        run: python scripts/audit-desktop-dependencies.py
       - name: Test synthetic ingestion and transfer workflows
         run: python -m unittest discover -s tests -v
       - name: Test native desktop widgets
@@ -43,5 +47,6 @@ jobs:
           path: |
             desktop-dist/CATALYST-Windows.exe
             desktop-dist/CATALYST-Mac-*.dmg
+            desktop-dist/dependency-audit-*.json
           if-no-files-found: error
           retention-days: 30

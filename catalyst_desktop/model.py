@@ -11,10 +11,11 @@ from pathlib import Path
 import re
 import uuid
 
-from catalyst_ingest.readers import InputError, read_artifact, coordinate_parts
+from catalyst_ingest.readers import InputError, read_artifact, coordinate_parts, source_filename
+from catalyst_ingest.jsonio import strict_loads
 from catalyst_ingest.toolkit import preview_toolkit_bundle
 from . import __version__
-from .traceability import lab_id, build_traceability, attach_subject
+from .traceability import lab_id, build_traceability, attach_subject, date_value
 
 MAX_FILE = 20 * 1024 * 1024
 MAX_TOTAL = 40 * 1024 * 1024
@@ -127,21 +128,26 @@ class Source:
     name: str
     content: bytes = field(repr=False)
     artifact: dict = field(repr=False)
+    _artifact_digest: str = field(init=False, repr=False)
+
+    def __post_init__(self):
+        object.__setattr__(self, 'content', bytes(self.content))
+        object.__setattr__(self, 'artifact', deepcopy(self.artifact))
+        object.__setattr__(self, '_artifact_digest', digest(encode(self.artifact)))
 
     @classmethod
     def from_bytes(cls, name, content, *, parse=True):
+        name = source_filename(name)
         if parse:
             artifact = read_artifact(content, name)
         else:
-            name = str(name).replace('\\', '/').rsplit('/', 1)[-1]
-            if (not name or len(name) > 240 or any(ord(c) < 32 for c in name)
-                    or not content or len(content) > MAX_FILE):
+            if not content or len(content) > MAX_FILE:
                 raise InputError('Supporting files need a valid filename and 1 byte–20 MiB of content.')
             artifact = dict(filename=name, sha256=digest(content), size_bytes=len(content), format='binary', sheets={},
                 parser=dict(name='catalyst-opaque', version='1', formulas_executed=False, parsed=False))
         # Preserve lexical JSON decimals in the desktop model, not Python float rounding.
         if artifact['format'] == 'json':
-            records = json.loads(content.decode('utf-8-sig'), parse_float=str, parse_int=str)
+            records = strict_loads(content, lexical_numbers=True)
             from catalyst_ingest.readers import col_name
             headers = list(records[0])
             cells = artifact['sheets']['Table']['cells']
@@ -158,7 +164,7 @@ class Source:
         return cls.from_bytes(path.name, content, parse=parse)
 
     def metadata(self):
-        return {k: self.artifact[k] for k in ('filename', 'sha256', 'size_bytes', 'format', 'parser')}
+        return deepcopy({k: self.artifact[k] for k in ('filename', 'sha256', 'size_bytes', 'format', 'parser')})
 
 def check_sources(sources):
     if not 1 <= len(sources) <= 6 or sum(len(s.content) for s in sources) > MAX_TOTAL:
@@ -169,8 +175,21 @@ def check_sources(sources):
         raise InputError('Source filenames must be unique, ignoring letter case.')
     if sum(len(sheet['cells']) for s in sources for sheet in s.artifact['sheets'].values()) > MAX_CELLS:
         raise InputError('The selected files exceed 200,000 combined source cells.')
-    if any(digest(s.content) != s.artifact['sha256'] for s in sources):
+    if any(digest(s.content) != s.artifact['sha256'] or s.name != source_filename(s.name)
+            or s.name != s.artifact['filename'] or len(s.content) != s.artifact['size_bytes']
+            or digest(encode(s.artifact)) != s._artifact_digest for s in sources):
         raise InputError('A source integrity check failed.')
+
+
+def load_sources(paths, existing=(), *, parse_tables=True):
+    """Stop at a combined limit before loading the rest of a selected bundle."""
+    if not 1 <= len(existing) + len(paths) <= 6:
+        raise InputError('Select one to six source files.')
+    sources = list(existing)
+    for path in paths:
+        sources.append(Source.from_path(path, parse=parse_tables and Path(path).suffix.lower() in ('.csv', '.xlsx', '.json')))
+        check_sources(sources)
+    return sources
 
 def table(source, sheet_name, header_row=1):
     if type(header_row) is not int or not 1 <= header_row <= 50000:
@@ -239,7 +258,7 @@ def context_issues(context, modality, toolkit=False):
         issues.append(issue('DATE_UNCONFIRMED', 'Acquisition date is not confirmed.', 'warning'))
     else:
         try:
-            datetime.strptime(context['acquiredAt'], '%Y-%m-%d')
+            date_value(context['acquiredAt'])
         except ValueError:
             issues.append(issue('DATE_INVALID', 'Use an acquisition date in YYYY-MM-DD format.'))
     for key in ('temperatureC', 'pressureKpaAbs', 'catalystMassMg', 'intervalMin'):
@@ -258,7 +277,8 @@ def build_preview(sources, entity, modality, context, profile=None, source_index
     entity = lab_id(entity)
     if not entity.strip() or modality not in MODALITIES:
         raise InputError('Choose a partner and supported modality.')
-    if not isinstance(context, dict) or any(not isinstance(v, str) or len(v) > 4000 for v in context.values()):
+    if not isinstance(context, dict) or len(context) > 100 or any(not isinstance(k, str) or len(k) > 100
+            or not isinstance(v, str) or len(v) > 4000 for k, v in context.items()):
         raise InputError('Context values must be text, at most 4,000 characters each.')
     context = {k: v.strip() for k, v in context.items()}
     issues = context_issues(context, modality, toolkit)
@@ -295,6 +315,9 @@ def build_preview(sources, entity, modality, context, profile=None, source_index
         preview['normalization'] = dict(imported['normalization'], profile=imported['profile'],
             profile_sha256=imported['profile_content_sha256'])
         data = deepcopy(imported['data'])
+        source_label = data['declared_processing_settings']['catalyst_id']
+        if source_label not in (context.get('localSampleId'), context.get('specimenId')) and not context.get('identityNote'):
+            issues.append(issue('PARTNER_SUBJECT_UNCONFIRMED', 'The toolkit catalyst label differs from the declared source label. Correct the label or record an explicit identity-correction note before approval.'))
         interval = None
         if context.get('intervalMin'):
             try: interval = number(context['intervalMin'])
@@ -334,6 +357,13 @@ def build_preview(sources, entity, modality, context, profile=None, source_index
     if (lab_id(profile['entity']), profile['modality'], profile['source_format']) != (entity, modality, source.artifact['format']):
         raise InputError('This mapping belongs to a different partner, modality, or format.')
     headers, records = table(source, profile['sheet'], profile['header_row'])
+    worksheet = source.artifact['sheets'][profile['sheet']]
+    if worksheet.get('state') != 'visible' or any(c.get('hidden') for c in worksheet['cells'].values()):
+        issues.append(issue('HIDDEN_SPREADSHEET_DATA', 'Hidden cells or a hidden worksheet are included. Review their role explicitly; visibility does not exclude data.', 'warning'))
+    if worksheet.get('merged_ranges'):
+        issues.append(issue('MERGED_SPREADSHEET_CELLS', 'This worksheet contains merged cells. Their values are not filled into neighbouring rows or columns.', 'warning'))
+    if any(c.get('number_format_unavailable') for c in worksheet['cells'].values()):
+        issues.append(issue('SPREADSHEET_FORMAT_UNAVAILABLE', 'Some cell number formats are unavailable. Review stored numeric values and units against the original spreadsheet.', 'warning'))
     if any(r['source'] not in headers for r in profile['rules']):
         raise InputError('Mapping source columns do not match this table.')
     unmapped = [h for h in headers if h not in {r['source'] for r in profile['rules']}]
@@ -351,6 +381,11 @@ def build_preview(sources, entity, modality, context, profile=None, source_index
                     raise InputError('Formula cells are not executed; provide an explicit values export.')
                 if cell.get('source_type') == 'e':
                     raise InputError('Spreadsheet error cells cannot become standardized values or sample labels.')
+                if cell.get('source_type') == 'n' and cell.get('number_format', {}).get('date_time'):
+                    raise InputError('Excel stores this date/time as a serial number. Supply an explicit elapsed-time or date text export; it is not an ordinary numeric measurement.')
+                if (cell.get('source_type') == 'n' and cell.get('number_format', {}).get('percent')
+                        and FIELDS[target][0] == 'number' and rule['unit'] != 'fraction'):
+                    raise InputError('Excel stores a displayed percentage as a fraction. Select fraction as the source unit, or provide an explicit values export.')
                 if value is None or value == '':
                     raise InputError('Mapped value is missing; it has not been replaced with zero.')
                 if FIELDS[target][0] == 'text':
@@ -361,10 +396,13 @@ def build_preview(sources, entity, modality, context, profile=None, source_index
                     n = Decimal(row[target])  # Already validated by convert; normalized decimals can exceed the input-text length.
                     if target.endswith('_fraction') and not 0 <= n <= 1:
                         raise InputError('Fraction is outside 0–1; confirm the measurement and basis.')
-                    if target in ('mass_g', 'time_s', 'flow_mL_min') and n < 0:
+                    if target in ('mass_g', 'time_s', 'flow_mL_min', 'uptake_mol_g',
+                            'scattering_q_A_inverse', 'photoelectron_k_A_inverse', 'radial_distance_A') and n < 0:
                         raise InputError('Negative physical value is not supported.')
                     if target in ('temperature_K', 'pressure_Pa_abs', 'wavelength_nm', 'energy_eV') and n <= 0:
                         raise InputError('A positive absolute quantity is required.')
+                    if target == 'two_theta_deg' and not 0 <= n <= 180:
+                        raise InputError('A 2-theta diffraction angle must be between 0 and 180 degrees.')
             except InputError as e:
                 row[target] = None
                 if len(issues) < 250:
@@ -411,7 +449,13 @@ class Revision:
     def value(self):
         if digest(self.content) != self.sha256:
             raise InputError('Revision integrity check failed.')
-        return json.loads(self.content)
+        try:
+            value = strict_loads(self.content)
+            if not isinstance(value, dict):
+                raise ValueError
+            return value
+        except ValueError:
+            raise InputError('Revision format is invalid or exceeds the supported limits.') from None
 
     def approve(self, reviewer, note, acknowledged=False):
         payload = self.value()
