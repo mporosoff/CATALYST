@@ -34,6 +34,8 @@ The 0.7 audit adds `contracts.py` for bounded saved-review/approval/source bindi
 
 Before building, update the isolated installer with `python -m pip install --upgrade pip==26.2.1`. After installing the build requirements, run `python scripts/audit-desktop-dependencies.py`; it checks public installed distribution names/versions against PyPI and writes an ignored report. It is never imported by the desktop runtime. CI blocks packaging on a vulnerable or incompletely checked dependency set and retains its report in build artifacts.
 
+Release packaging requires **Python 3.13.15** on Windows and Mac, enforced by both the workflow and packaging script. This avoids silently bundling an older cached 3.12 interpreter. The packaged application includes Python; teammates do not install it separately. Compatibility tests may still run locally on a patched 3.12 interpreter.
+
 - `python -m unittest discover -s tests -v`: synthetic scientific boundaries, source precision/preservation, native transport security, approval, upload/read-back, corruption, and lost-response recovery. No live credentials or research data.
 - `python scripts/test-desktop-gui.py`: real wheel events over fields/selectors, high-resolution wheel accumulation, minimum-window layout, dynamically rebuilt context, native result scrolling delegation, mapping disclosure, persistent review action, release link, schema plan/application, selection, mapping, preview, approval, and invalidation. No network or credential store calls.
 - `python -m pip install -r requirements-desktop-build.txt` then `python scripts/build-desktop.py`: package on the target operating system. Outputs go to ignored `desktop-dist/`; only code, Python dependencies, and public mapping definitions are included.

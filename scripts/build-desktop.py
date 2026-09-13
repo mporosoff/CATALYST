@@ -6,6 +6,9 @@ import shutil
 import subprocess
 import sys
 
+if sys.version_info[:3] != (3, 13, 15):
+    raise SystemExit('Release packaging requires Python 3.13.15, matching the validated Windows/macOS workflow.')
+
 root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(root))
 from catalyst_desktop import __version__
