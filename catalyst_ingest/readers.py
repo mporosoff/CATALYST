@@ -293,6 +293,13 @@ def read_artifact(content: bytes, filename: str) -> dict:
                 if any(isinstance(v, (list, dict)) or isinstance(v, float) and not math.isfinite(v) for v in row.values()):
                     raise InputError('Nested or non-finite JSON values are unsupported.')
             sheets = _table_sheet([headers] + [[r[k] for k in headers] for r in data])
+            # As with XLSX, retain the exact numeric token alongside the display value.
+            # Parsing floats alone would erase source precision in offline review exports.
+            lexical = strict_loads(text, lexical_numbers=True)
+            for row_num, record in enumerate(data, 2):
+                for col, key in enumerate(headers, 1):
+                    if type(record[key]) in (int, float):
+                        sheets['Table']['cells'][f'{col_name(col)}{row_num}']['lexical_value'] = lexical[row_num - 2][key]
     else:
         raise InputError('Supported input types are CSV, XLSX, and flat-record JSON.')
     return {'filename': filename, 'sha256': hashlib.sha256(content).hexdigest(),

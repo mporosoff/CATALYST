@@ -113,7 +113,7 @@ def _preview_toolkit_bundle(artifacts, entity, modality):
     embedded_values = {a: c['value'] for a, c in embedded.items() if c.get('value') is not None}
     raw_matches = ({a: _cell_evidence(c) for a, c in source_cells.items() if c.get('value') is not None}
         == {a: _cell_evidence(c) for a, c in embedded.items() if c.get('value') is not None}
-        and not any('formula' in c for c in source_cells.values()))
+        and not any('formula' in c for c in [*source_cells.values(), *embedded.values()]))
     if not raw_matches:
         issues.append(_issue('EMBEDDED_RAW_MISMATCH', 'Embedded raw values differ from the supplied original report.', 'error'))
     raw_labels = [value for address, value in sorted(original_values.items(), key=lambda x: coordinate_parts(x[0]))
@@ -130,7 +130,8 @@ def _preview_toolkit_bundle(artifacts, entity, modality):
         value = settings.get('B' + address[1:], {})
         if 'formula' in value or value.get('value') is None:
             continue
-        left, right = value['value'], summary[key]
+        left = value.get('lexical_value') if value.get('source_type') == 'n' else value['value']
+        right = summary[key]
         equal = str(left) == right or (_decimal(left) is not None and _decimal(right) is not None and Decimal(str(left)) == Decimal(right))
         if not equal:
             precision_only = False
@@ -144,9 +145,16 @@ def _preview_toolkit_bundle(artifacts, entity, modality):
     quantities = []
     def quantity(artifact, col_map, row_num, source_name, source_value, field, unit, factor):
         number = _numeric(source_value, optional=True)
-        return {'field': field, 'unit': unit, 'value_decimal': str(number * Decimal(factor)) if number is not None else None,
+        converted = number * Decimal(factor) if number is not None else None
+        location = _location(artifact, 'Table', f'{col_name(col_map[source_name])}{row_num}')
+        fraction = field in ('reactant_conversion', 'steady_state_conversion') or field.startswith('steady_state_carbon_selectivity/')
+        if converted is not None and (converted < 0 or fraction and converted > 1):
+            issues.append(_issue('TOOLKIT_VALUE_RANGE',
+                f'{source_name} is outside the supported physical range; review the original result and its basis.',
+                'error', [location]))
+        return {'field': field, 'unit': unit, 'value_decimal': str(converted) if converted is not None else None,
                 'source_value': source_value, 'source_field': source_name, 'rule': 'multiply/' + factor,
-                'source': _location(artifact, 'Table', f'{col_name(col_map[source_name])}{row_num}')}
+                'source': location}
     for name, rule in profile['summary_quantities'].items():
         if name in summary:
             quantities.append(quantity(summary_artifact, summary_columns, 2, name, summary[name], **rule))
@@ -158,11 +166,16 @@ def _preview_toolkit_bundle(artifacts, entity, modality):
                 continue
             quantities.append(quantity(summary_artifact, summary_columns, 2, name, summary[name], 'steady_state_carbon_selectivity/' + species, '1', '0.01'))
     counts = {name: _integer(summary[name]) for name in ['n_bypass', 'n_reaction', 'n_blank_excluded', 'plot_reaction_points', 'bypass_omit_initial', 'bypass_points_used', 'bypass_selected_points', 'ss_inj_start', 'ss_inj_end']}
+    if any(summary[name] == '' for name in ('conversion_%', 'carbon_balance_%')):
+        issues.append(_issue('SUMMARY_RESULT_MISSING', 'The toolkit summary is missing conversion or carbon balance.', 'error'))
     if counts['ss_inj_start'] > counts['ss_inj_end'] or counts['bypass_omit_initial'] > counts['bypass_points_used']:
         issues.append(_issue('INVALID_SELECTION_SETTINGS', 'Steady-state or bypass selection settings are inconsistent.', 'error'))
     rows = []; measured = Counter()
     for number, row in source_rows:
         bypass, blank, included = (_bool(row[key]) for key in ['is_bypass', 'is_blank', 'analysis_include'])
+        location = _location(flows_artifact, 'Table', f'{col_name(columns["label"])}{number}')
+        if bypass and blank:
+            issues.append(_issue('ROW_FLAGS_CONFLICT', 'A row cannot be both a bypass and a blank.', 'error', [location]))
         if row['catalyst_id'] != summary['catalyst_id']:
             issues.append(_issue('CATALYST_ID_MISMATCH', 'Flows CSV and summary have different catalyst identifiers.', 'error'))
         measured.update(n_bypass=int(bypass), n_blank_excluded=int(blank), n_reaction=int(not bypass and not blank), plot_reaction_points=int(included))
@@ -176,8 +189,11 @@ def _preview_toolkit_bundle(artifacts, entity, modality):
         values.extend([quantity(flows_artifact, columns, number, 'time_on_stream_h', row['time_on_stream_h'], 'nominal_time_on_stream', 's', '3600'),
                        quantity(flows_artifact, columns, number, 'conversion', row['conversion'], 'reactant_conversion', '1', '1')])
         injection = _numeric(row['inj_num'], optional=True)
-        if injection is not None and (injection < 0 or injection != injection.to_integral_value()):
-            raise InputError('Injection numbers must be nonnegative integers when present.')
+        if injection is not None and (not 0 <= injection <= MAX_ROWS or injection != injection.to_integral_value()):
+            raise InputError('Injection numbers must be nonnegative integers within the supported row limit when present.')
+        if included and (injection is None or row['conversion'] == '' or row['time_on_stream_h'] == ''):
+            issues.append(_issue('INCLUDED_RESULT_MISSING',
+                'An included reaction row needs its injection number, time, and conversion.', 'error', [location]))
         rows.append({'source_row': number, 'original_label': row['label'], 'source_role_candidate': source_role,
                      'partner_row_status': row['row_status'], 'analysis_include': included,
                      'steady_state_include': included and not bypass and not blank and injection is not None and counts['ss_inj_start'] <= injection <= counts['ss_inj_end'],
@@ -185,6 +201,8 @@ def _preview_toolkit_bundle(artifacts, entity, modality):
     for key, count in measured.items():
         if counts[key] != count:
             issues.append(_issue('ROW_COUNT_MISMATCH', f'Summary {key} disagrees with flows CSV.', 'error'))
+    if not any(row['steady_state_include'] for row in rows):
+        issues.append(_issue('STEADY_STATE_EMPTY', 'The declared steady-state range contains no included reaction rows.', 'error'))
     formulas = [c for sheet in workbook['sheets'].values() for c in sheet['cells'].values() if 'formula' in c]
     if any(c.get('cached_value') is None for c in formulas):
         issues.append(_issue('UNCACHED_WORKBOOK_FORMULAS', 'Workbook formulas have no cached results. Numerical results are imported from the companion CSVs; no workbook formulas were executed.'))

@@ -20,14 +20,16 @@ def load_catalog(client, group_id, progress=lambda _: None):
             count += 1
             if count > MAX_REVIEWS:
                 raise SciSureError('The active group exceeds this release’s 250-review catalog limit. No partial catalog will be used for publication.')
+            # Even a section whose manifest upload was interrupted reserves its
+            # revision ID; otherwise reconnecting could create it elsewhere.
+            if item['revision_id'] in revisions:
+                raise SciSureError('A revision appears in more than one SciSure section. Reconcile the duplicate before catalog reuse.')
+            revisions[item['revision_id']] = item['section_id']
             if not item['manifest_id']:
                 orphan_sections.append(dict(item, destination=destination))
                 continue
             loaded = read_review(client, destination, item['section_id'])
             payload = loaded['revision'].value()
-            if payload['id'] in revisions:
-                raise SciSureError('A revision appears in more than one SciSure section. Reconcile the duplicate before catalog reuse.')
-            revisions[payload['id']] = loaded['revision'].sha256
             preview = payload['preview']
             profiles.append(preview['normalization'].get('profile', {}))
             trace = preview.get('traceability')

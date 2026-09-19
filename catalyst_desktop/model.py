@@ -123,6 +123,19 @@ def convert(value, unit):
         factor, offset = CONVERSIONS[unit]
         return decimal_text(number(value) * Decimal(factor) + Decimal(offset))
 
+
+def validate_numeric_field(target, value):
+    """Apply the same physical bounds to newly mapped and stored normalized values."""
+    if target.endswith('_fraction') and not 0 <= value <= 1:
+        raise InputError('Fraction is outside 0–1; confirm the measurement and basis.')
+    if target in ('mass_g', 'time_s', 'flow_mL_min', 'uptake_mol_g',
+            'scattering_q_A_inverse', 'photoelectron_k_A_inverse', 'radial_distance_A') and value < 0:
+        raise InputError('Negative physical value is not supported.')
+    if target in ('temperature_K', 'pressure_Pa_abs', 'wavelength_nm', 'energy_eV', 'wavenumber_cm_inverse') and value <= 0:
+        raise InputError('A positive absolute quantity is required.')
+    if target == 'two_theta_deg' and not 0 <= value <= 180:
+        raise InputError('A 2-theta diffraction angle must be between 0 and 180 degrees.')
+
 @dataclass(frozen=True)
 class Source:
     name: str
@@ -147,13 +160,9 @@ class Source:
                 parser=dict(name='catalyst-opaque', version='1', formulas_executed=False, parsed=False))
         # Preserve lexical JSON decimals in the desktop model, not Python float rounding.
         if artifact['format'] == 'json':
-            records = strict_loads(content, lexical_numbers=True)
-            from catalyst_ingest.readers import col_name
-            headers = list(records[0])
-            cells = artifact['sheets']['Table']['cells']
-            for row, record in enumerate(records, 2):
-                for col, key in enumerate(headers, 1):
-                    cells[f'{col_name(col)}{row}']['value'] = record[key]
+            for cell in artifact['sheets']['Table']['cells'].values():
+                if 'lexical_value' in cell:
+                    cell['value'] = cell['lexical_value']
         return cls(artifact['filename'], bytes(content), artifact)
 
     @classmethod
@@ -206,6 +215,8 @@ def table(source, sheet_name, header_row=1):
     headers = {}
     for col, (_, cell) in sorted(header.items()):
         name = cell.get('value')
+        if name in (None, '') and 'formula' not in cell:
+            continue  # Formatting-only spreadsheet cells do not define columns.
         if 'formula' in cell or not isinstance(name, str) or not name.strip() or name in headers.values():
             raise InputError('The selected header row must contain unique, nonempty text labels.')
         headers[col] = name
@@ -215,7 +226,8 @@ def table(source, sheet_name, header_row=1):
     for row, values in sorted(rows.items()):
         if not any(c.get('value') not in (None, '') or 'formula' in c for _, c in values.values()):
             continue
-        if set(values) - set(headers):
+        if any(c.get('value') not in (None, '') or 'formula' in c
+                for col, (_, c) in values.items() if col not in headers):
             raise InputError('A data row contains columns without a header.')
         result.append((row, {name: values.get(col, (None, {'value': None})) for col, name in headers.items()}))
     return list(headers.values()), result
@@ -229,8 +241,11 @@ def make_profile(entity, modality, source_format, source_version, name, version,
         raise InputError('Choose a source format and a positive mapping version.')
     if type(header_row) is not int or not 1 <= header_row <= 50000:
         raise InputError('Choose a valid header row.')
-    if not rules or len(rules) > len(FIELDS):
+    if not isinstance(rules, list) or not rules or len(rules) > len(FIELDS):
         raise InputError('Map at least one source column to a canonical field.')
+    if any(not isinstance(r, dict) or any(not isinstance(r.get(k), str) or not r[k].strip()
+            or len(r[k]) > 32768 for k in ('source', 'target', 'unit')) for r in rules):
+        raise InputError('Each mapping rule needs a source column, canonical field, and source unit.')
     if len({r['target'] for r in rules}) != len(rules) or len({r['source'] for r in rules}) != len(rules):
         raise InputError('Map each source column and canonical field only once.')
     normalized = []
@@ -240,7 +255,7 @@ def make_profile(entity, modality, source_format, source_version, name, version,
             raise InputError('Choose a supported canonical field and source unit.')
         aliases = rule.get('aliases', {})
         if not isinstance(aliases, dict) or len(aliases) > 100 or any(
-                not isinstance(k, str) or not k or len(k) > 200 or not isinstance(v, str) or not v or len(v) > 200
+                not isinstance(k, str) or not k.strip() or len(k) > 200 or not isinstance(v, str) or not v.strip() or len(v) > 200
                 for k, v in aliases.items()) or (FIELDS[target][0] == 'number' and aliases):
             raise InputError('Use exact source-name to canonical-name aliases only for text fields.')
         normalized.append(dict(source=rule['source'], target=target, unit=unit, aliases=dict(sorted(aliases.items()))))
@@ -271,6 +286,29 @@ def context_issues(context, modality, toolkit=False):
         except InputError:
             issues.append(issue('CONTEXT_INVALID_' + key, f'{key} must contain a number in the physical range.'))
     return issues
+
+def toolkit_review_data(source_data, interval_text):
+    """Preserve imported results and derive only the explicitly declared nominal axis."""
+    data = deepcopy(source_data)
+    interval = None
+    if interval_text:
+        try:
+            interval = number(interval_text)
+        except InputError:
+            pass
+    accepted = 0
+    for row in data['rows']:
+        row['review_time_s'] = None
+        if row['analysis_include'] and interval is not None and interval > 0:
+            with localcontext() as precision:
+                precision.prec = 800
+                row['review_time_s'] = decimal_text(interval * 60 * accepted)
+            accepted += 1
+    axis = dict(executed=interval is not None and interval > 0, method='nominal-gc-time-axis/1',
+        interval_min=str(interval) if interval is not None else None,
+        index_basis='zero-based included reaction row order', original_axis_preserved=True)
+    return data, axis
+
 
 def build_preview(sources, entity, modality, context, profile=None, source_index=0, toolkit=False, raw_only=False):
     check_sources(sources)
@@ -314,7 +352,7 @@ def build_preview(sources, entity, modality, context, profile=None, source_index
             issues.append(copy)
         preview['normalization'] = dict(imported['normalization'], profile=imported['profile'],
             profile_sha256=imported['profile_content_sha256'])
-        data = deepcopy(imported['data'])
+        data, time_axis = toolkit_review_data(imported['data'], context.get('intervalMin'))
         source_label = data['declared_processing_settings']['catalyst_id']
         if source_label not in (context.get('localSampleId'), context.get('specimenId')) and not context.get('identityNote'):
             issues.append(issue('PARTNER_SUBJECT_UNCONFIRMED', 'The toolkit catalyst label differs from the declared source label. Correct the label or record an explicit identity-correction note before approval.'))
@@ -322,19 +360,8 @@ def build_preview(sources, entity, modality, context, profile=None, source_index
         if context.get('intervalMin'):
             try: interval = number(context['intervalMin'])
             except InputError: pass
-        accepted = 0
-        for row in data['rows']:
-            row['review_time_s'] = None
-            if row['analysis_include'] and interval is not None and interval > 0:
-                with localcontext() as ctx:
-                    ctx.prec = 180
-                    row['review_time_s'] = decimal_text(interval * 60 * accepted)
-                accepted += 1
         preview['standardized'] = data
-        preview['scientific_processing'] = dict(imported['processing'],
-            time_axis={'executed': interval is not None and interval > 0, 'method': 'nominal-gc-time-axis/1',
-                'interval_min': str(interval) if interval is not None else None,
-                'index_basis': 'zero-based included reaction row order', 'original_axis_preserved': True})
+        preview['scientific_processing'] = dict(imported['processing'], time_axis=time_axis)
         if context.get('identityNote'):
             issues.append(issue('LABEL_CORRECTION_RECORDED', 'Original source labels are preserved alongside the contributor correction.', 'warning'))
         if interval is not None and interval != number(data['declared_processing_settings']['injection_interval_min']):
@@ -350,6 +377,8 @@ def build_preview(sources, entity, modality, context, profile=None, source_index
     if not profile:
         issues.append(issue('MAPPING_REQUIRED', 'Create or load an explicit versioned mapping.'))
         return preview
+    if type(source_index) is not int or not 0 <= source_index < len(sources):
+        raise InputError('Choose one of the selected source files for the mapping.')
     source = sources[source_index]
     if source.artifact['format'] == 'binary':
         raise InputError('Select a CSV/XLSX/flat JSON table for mapping. Native/supporting files are preserved without interpretation.')
@@ -394,15 +423,7 @@ def build_preview(sources, entity, modality, context, profile=None, source_index
                 else:
                     row[target] = convert(value, rule['unit'])
                     n = Decimal(row[target])  # Already validated by convert; normalized decimals can exceed the input-text length.
-                    if target.endswith('_fraction') and not 0 <= n <= 1:
-                        raise InputError('Fraction is outside 0–1; confirm the measurement and basis.')
-                    if target in ('mass_g', 'time_s', 'flow_mL_min', 'uptake_mol_g',
-                            'scattering_q_A_inverse', 'photoelectron_k_A_inverse', 'radial_distance_A') and n < 0:
-                        raise InputError('Negative physical value is not supported.')
-                    if target in ('temperature_K', 'pressure_Pa_abs', 'wavelength_nm', 'energy_eV') and n <= 0:
-                        raise InputError('A positive absolute quantity is required.')
-                    if target == 'two_theta_deg' and not 0 <= n <= 180:
-                        raise InputError('A 2-theta diffraction angle must be between 0 and 180 degrees.')
+                    validate_numeric_field(target, n)
             except InputError as e:
                 row[target] = None
                 if len(issues) < 250:

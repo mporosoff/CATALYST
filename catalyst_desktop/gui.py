@@ -14,9 +14,10 @@ from . import __version__
 from .design import apply_theme, Card, page_heading, section_navigation, icon, PAPER, INK, MUTED, GREEN, SIDEBAR, LINE
 from .model import (Source, Revision, InputError, MODALITIES, COMMON_CONTEXT, MODALITY_CONTEXT,
     FIELDS, build_preview, make_profile, table, check_sources, load_sources)
-from .scisure import SciSureClient, SciSureError, SANDBOX, remote_id
+from .scisure import SciSureClient, SciSureError, SANDBOX, remote_id, tenant_origin
 from .credentials import load_token, save_token, forget_token, CredentialError
 from .publication import Publisher, history, read_review, download
+from .exports import suggested_filename, save_bytes, review_archive
 from catalyst_ingest.jsonio import strict_loads
 from .traceability import (LAB_CHOICES, MATERIAL_KINDS, MODEL_RELATIONS, PHYSICAL_CONTEXT,
     COMPUTATIONAL_CONTEXT, lab_id, lab_name, new_id, trace_context)
@@ -261,18 +262,18 @@ class Application:
 
     def build_connection(self):
         p = self.connection_tab.body
-        page_heading(p, 'SciSure connection', 'Your laboratory records, connected directly to this workspace.', 'CONNECT  /  SCISURE SANDBOX')
+        page_heading(p, 'SciSure connection', 'Your laboratory records, connected directly to this workspace.', 'CONNECT  /  SCISURE')
         card = Card(p)
         card.pack(fill='x')
         p = card.body
         ttk.Label(p, text='Account & access', style='Sub.TLabel').pack(anchor='w')
-        ttk.Label(p, text='Use your SciSure API token to access the sandbox.', style='Muted.TLabel').pack(anchor='w', pady=(5, 8))
+        ttk.Label(p, text='Enter your SciSure server URL and an API token for that server.', style='Muted.TLabel').pack(anchor='w', pady=(5, 8))
         fields = ttk.Frame(p)
         fields.pack(fill='x', pady=12)
         self.tenant = tk.StringVar(value=SANDBOX)
         self.token = tk.StringVar()
-        tenant_widget = self.label_entry(fields, 0, 'SciSure tenant', self.tenant)
-        tenant_widget.configure(state='readonly')
+        self.label_entry(fields, 0, 'SciSure server URL', self.tenant)
+        self.tenant.trace_add('write', self.server_changed)
         self.label_entry(fields, 1, 'API token', self.token, show='•')
         self.remember = tk.BooleanVar(value=False)
         ttk.Checkbutton(p, text='Remember in this computer’s operating system credential store', variable=self.remember).pack(anchor='w')
@@ -368,24 +369,37 @@ class Application:
         self.run('Inspecting native SciSure sample fields and account scope…', lambda: inspect_setup(client, group,
             lambda message: self.messages.put(('progress', message)), experiment_id=eid, sample_id=sid, protocol_version_id=pid), done)
 
+    def server_changed(self, *_):
+        # Never carry a loaded credential or a verified destination to another host.
+        self.token.set('')
+        self.client = None
+        self.group_id = None
+        self.experiments = []
+        if hasattr(self, 'experiment'):
+            self.experiment.configure(values=[])
+            self.experiment.set('')
+            self.clear_destination()
+            self.connection_status.set('Server changed. Enter a token for this server and connect.')
+
     def connect(self):
         if self.busy:
             return
         token = self.token.get()
+        origin = self.tenant.get()
         remember = self.remember.get()
         self.clear_destination()
-        self.connection_status.set('Connecting to the SciSure sandbox…')
+        self.connection_status.set('Connecting to the selected SciSure server…')
         self.client = None
         self.group_id = None
         self.experiments = []
         self.experiment.configure(values=[])
         self.experiment.set('')
         def work():
-            client = SciSureClient(token)
+            client = SciSureClient(token, origin=origin)
             connection = client.check_connection()
             warning = None
             if remember:
-                try: save_token(SANDBOX, token.strip())
+                try: save_token(client.origin, token.strip())
                 except CredentialError as e: warning = str(e)
             return client, connection, warning
         def done(result):
@@ -394,23 +408,25 @@ class Application:
             self.experiments = connection['experiments']
             self.experiment.configure(values=[f'{e["experimentID"]} · {e.get("name", "Unnamed")} · {e.get("signatureStatus", "Unknown status")}' for e in self.experiments])
             self.token.set('')
-            self.connection_status.set(f'Connected to {connection["group_name"]} (group {self.group_id}). {len(self.experiments)} experiments available.')
+            self.connection_status.set(f'Connected to {self.client.origin} · {connection["group_name"]} (group {self.group_id}). {len(self.experiments)} experiments available.')
             self.status.set(warning or 'Connection verified. Select an experiment and verify it before sending data.')
         self.run('Checking the SciSure connection…', work, done,
             lambda: self.connection_status.set('Connection not verified. Check the token and connection, then try again.'))
 
     def use_saved_token(self):
+        origin = self.tenant.get()
         def done(token):
             if not token:
                 self.status.set('No saved token was found. Enter a token to connect.')
                 return
             self.token.set(token)
             self.status.set('Saved token loaded. Click Connect to check SciSure.')
-        self.run('Opening the system credential store…', lambda: load_token(SANDBOX), done)
+        self.run('Opening the system credential store…', lambda: load_token(tenant_origin(origin)), done)
 
     def forget(self):
         if self.busy:
             return
+        origin = self.tenant.get()
         self.token.set('')
         self.client = None
         self.group_id = None
@@ -419,7 +435,7 @@ class Application:
         self.experiment.set('')
         self.clear_destination()
         self.connection_status.set('Disconnected.')
-        self.run('Removing the saved token…', lambda: forget_token(SANDBOX),
+        self.run('Removing the saved token…', lambda: forget_token(tenant_origin(origin)),
             lambda _: self.status.set('Saved token removed. Research files were not changed.'))
 
     def clear_destination(self):
@@ -1108,6 +1124,7 @@ class Application:
         more = ttk.Menubutton(actions, text='More actions ▾')
         menu = tk.Menu(more, tearoff=False)
         menu.add_command(label='Load review + originals', command=lambda: self.open_history(True))
+        menu.add_command(label='Download review package…', command=self.export_review)
         menu.add_command(label='Reuse mapping / revise', command=self.revise_loaded)
         more.configure(menu=menu)
         more.pack(side='left')
@@ -1117,11 +1134,12 @@ class Application:
             self.history_table.column(key, width=width, minwidth=80, stretch=False)
         p = self.library_files
         ttk.Label(p, text='Original experiment attachments', style='Sub.TLabel').pack(anchor='w')
-        ttk.Label(p, text='Browse files without creating an additional local copy.', style='Muted.TLabel').pack(anchor='w', pady=(8, 16))
+        ttk.Label(p, text='Preview files or download a copy to a folder you choose.', style='Muted.TLabel').pack(anchor='w', pady=(8, 16))
         actions = ttk.Frame(p)
         actions.pack(fill='x', pady=(0, 16))
         ttk.Button(actions, text='Browse attachments', style='Primary.TButton', command=self.browse_files).pack(side='left')
         ttk.Button(actions, text='Read selected file', command=self.read_file).pack(side='left', padx=8)
+        ttk.Button(actions, text='Download…', command=self.export_file).pack(side='left')
         self.file_table = self.scrolling_table(p, ('name', 'section', 'id', 'parent', 'stored', 'size'))
         for key, name, width in [('name', 'File', 240), ('section', 'Section', 180), ('id', 'File ID', 85),
                 ('parent', 'Previous file ID', 115), ('stored', 'Stored', 165), ('size', 'Bytes', 85)]:
@@ -1247,19 +1265,66 @@ class Application:
             self.status.set(f'{len(self.remote_files)} attachments listed, newest file IDs first. Same-name Office revisions retain separate IDs. Embedded notebook images use separate SciSure endpoints.')
         self.run('Listing experiment files…', work, done)
 
+    def attachment_bytes(self, client, destination, file):
+        client.verify_destination(destination, writable=False)
+        sid = remote_id(file['section_id'])
+        sections = client.list(f'/api/v1/experiments/{destination["experiment_id"]}/sections')
+        if len([s for s in sections if remote_id(s.get('expJournalID')) == sid and not s.get('deleted')
+                and s.get('sectionType') in ('FILE', 'FILES', 'CUSTOM')]) != 1:
+            raise InputError('The selected attachment section changed or is missing. Refresh the file list.')
+        base = f'/api/v1/experiments/sections/{sid}/files'
+        fid = remote_id(file['experimentFileID'])
+        current = [item for item in client.list(base) if remote_id(item.get('experimentFileID')) == fid]
+        if len(current) != 1 or current[0].get('realName') != file.get('realName'):
+            raise InputError('The selected attachment changed or is missing. Refresh the file list.')
+        content = download(client, base, current[0], size=file.get('fileSize'), experiment=destination['experiment_id'])
+        after = [item for item in client.list(base) if remote_id(item.get('experimentFileID')) == fid]
+        if after != current:
+            raise InputError('The attachment changed while downloading. Refresh the file list and try again.')
+        sections_after = client.list(f'/api/v1/experiments/{destination["experiment_id"]}/sections')
+        if len([s for s in sections_after if remote_id(s.get('expJournalID')) == sid and not s.get('deleted')
+                and s.get('sectionType') in ('FILE', 'FILES', 'CUSTOM')]) != 1:
+            raise InputError('The attachment section changed while downloading. Refresh the file list.')
+        client.verify_destination(destination, writable=False)
+        return content
+
+    def export_file(self):
+        selection = self.file_table.selection()
+        if self.busy or not selection or not self.client: return
+        file = dict(self.remote_files[int(selection[0])])
+        client, destination = self.client, dict(self.files_destination)
+        path = filedialog.asksaveasfilename(parent=self.root, title='Download SciSure attachment',
+            initialfile=suggested_filename(file.get('realName')), filetypes=[('All files', '*.*')])
+        if not path: return
+        def work():
+            content = self.attachment_bytes(client, destination, file)
+            save_bytes(path, content)
+            return len(content)
+        self.run('Downloading the selected attachment…', work,
+            lambda size: self.status.set(f'Downloaded {size:,} bytes to {path}'))
+
+    def export_review(self):
+        selection = self.history_table.selection()
+        if self.busy or not selection or not self.client: return
+        row = dict(self.history_rows[int(selection[0])])
+        client, destination = self.client, dict(self.history_destination)
+        path = filedialog.asksaveasfilename(parent=self.root, title='Download verified review package',
+            initialfile=suggested_filename('CATALYST-' + row['revision_id'] + '.zip', 'CATALYST-review.zip'),
+            defaultextension='.zip', filetypes=[('Review package', '*.zip')])
+        if not path: return
+        def work():
+            loaded = read_review(client, destination, row['section_id'], True)
+            save_bytes(path, review_archive(loaded))
+        self.run('Downloading and verifying the review and all original files…', work,
+            lambda _: self.status.set(f'Verified review, standardized data, and originals downloaded to {path}'))
+
     def read_file(self):
         selection = self.file_table.selection()
         if not selection or not self.client: return
         f = dict(self.remote_files[int(selection[0])])
         client, destination = self.client, dict(self.files_destination)
         def work():
-            client.verify_destination(destination, writable=False)
-            base = f'/api/v1/experiments/sections/{f["section_id"]}/files'
-            current = [item for item in client.list(base) if item.get('experimentFileID') == f['experimentFileID']]
-            if len(current) != 1 or current[0].get('realName') != f.get('realName'):
-                raise InputError('The selected attachment changed or is missing. Refresh the file list.')
-            content = download(client, base, current[0], size=f.get('fileSize'), experiment=destination['experiment_id'])
-            client.verify_destination(destination, writable=False)
+            content = self.attachment_bytes(client, destination, f)
             name = str(f.get('realName', 'file'))
             if name.lower().endswith(('.csv', '.xlsx', '.json')):
                 try:

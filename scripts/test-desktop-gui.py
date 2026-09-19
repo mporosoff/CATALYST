@@ -4,6 +4,7 @@ from pathlib import Path
 import time
 import tkinter as tk
 import tempfile
+import zipfile
 from types import SimpleNamespace
 from tkinter import ttk
 from unittest.mock import patch
@@ -11,12 +12,15 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tests'))
 from catalyst_desktop.gui import Application, RELEASES_URL
-from catalyst_desktop.model import Source
+from catalyst_desktop.model import Source, InputError
 from catalyst_desktop.model import COMMON_CONTEXT, MODALITY_CONTEXT
 from catalyst_desktop.traceability import trace_context
 from desktop_fixtures import physical_context
 from test_api_contract import NativeSetupAPI, client_for
 from test_configuration import SchemaAPI
+from test_desktop import FakeSciSure, review
+from catalyst_desktop.scisure import SciSureClient, SANDBOX
+from catalyst_desktop.publication import Publisher
 
 
 def descendants(widget):
@@ -269,6 +273,63 @@ with patch('tkinter.messagebox.showerror', side_effect=lambda *a, **kw: errors.a
     finish(app)
     assert schema_api.native_posts == 17
     assert 'Native material schema verified' in app.status.get()
+    # A selected custom server drives connection and origin-bound credential storage.
+    api = FakeSciSure()
+    custom_origin = 'https://scisure.example.edu'
+    def custom_transport(url, method, headers, body):
+        assert url.startswith(custom_origin + '/api/v1/')
+        return api(SANDBOX + url[len(custom_origin):], method, headers, body)
+    custom_client = SciSureClient('synthetic-token', origin=custom_origin, transport=custom_transport)
+    app.tenant.set(custom_origin)
+    app.token.set('synthetic-token')
+    app.remember.set(True)
+    with patch('catalyst_desktop.gui.SciSureClient', return_value=custom_client) as constructor, \
+            patch('catalyst_desktop.gui.save_token') as saved:
+        app.connect()
+        finish(app)
+        constructor.assert_called_once_with('synthetic-token', origin=custom_origin)
+        saved.assert_called_once_with(custom_origin, 'synthetic-token')
+    assert app.client is custom_client and app.token.get() == ''
+    app.experiment.current(0)
+    destination = custom_client.destination(42, 7)
+    download_source, _, download_revision = review()
+    Publisher(custom_client, destination).publish(download_revision,
+        download_revision.approve('GUI tester', 'Synthetic export', True), [download_source])
+    app.load_history()
+    finish(app)
+    app.history_table.selection_set('0')
+    with tempfile.TemporaryDirectory() as folder:
+        package = Path(folder) / 'review.zip'
+        with patch('tkinter.filedialog.asksaveasfilename', return_value=str(package)):
+            app.export_review()
+            finish(app)
+        with zipfile.ZipFile(package) as archive:
+            assert archive.read('originals/01-synthetic.csv') == download_source.content
+            assert 'standardized.csv' in archive.namelist()
+        app.browse_files()
+        finish(app)
+        index = next(i for i, item in enumerate(app.remote_files) if item['realName'] == '01-synthetic.csv')
+        app.file_table.selection_set(str(index))
+        attachment = Path(folder) / 'original.csv'
+        with patch('tkinter.filedialog.asksaveasfilename', return_value=str(attachment)):
+            app.export_file()
+            finish(app)
+        assert attachment.read_bytes() == download_source.content
+        with patch('tkinter.filedialog.asksaveasfilename', return_value=''), \
+                patch.object(app, 'attachment_bytes') as cancelled:
+            app.export_file()
+            cancelled.assert_not_called()
+        with patch('tkinter.filedialog.asksaveasfilename', return_value=str(attachment)), \
+                patch.object(app, 'attachment_bytes', side_effect=InputError('Synthetic corrupt download')):
+            app.export_file()
+            finish(app)
+        assert attachment.read_bytes() == download_source.content
+        assert len(errors) == 1 and 'Synthetic corrupt download' in errors.pop()[1]
+    app.token.set('synthetic-token')
+    app.tenant.set(SANDBOX)
+    assert app.client is None and app.token.get() == '' and not app.remote_files
+    assert not app.history_rows and app.group_id is None and app.destination is None
+    app.remember.set(False)
     # Failed sign-in cannot leave a stale connected indicator, experiment, or remote preview.
     app.show_text(app.remote_text, 'Synthetic previous account record')
     app.token.set('synthetic-token')
@@ -293,4 +354,4 @@ with patch('tkinter.messagebox.showerror', side_effect=lambda *a, **kw: errors.a
     assert app.review_button.instate(['disabled'])
     assert not errors, str(errors)
     app.close()
-print('Native GUI smoke passed: scrolling, mapping, files, approval, lineage, schema review/application, reconnect guards, rejected sign-in, and cleared disconnected state. No network calls.')
+print('Native GUI smoke passed: layout, mapping, approval, schema setup, custom-server credentials, verified review/file downloads, cancelled/failed saves, reconnect guards, and disconnected state. No network calls.')

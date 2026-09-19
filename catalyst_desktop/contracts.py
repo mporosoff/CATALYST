@@ -1,10 +1,11 @@
 """Validate stored review envelopes before trusting or downloading their contents."""
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 import re
 import uuid
 
 from .model import (InputError, MAX_FILE, MAX_TOTAL, MODALITIES, encode, digest,
-    make_profile, context_issues)
+    make_profile, context_issues, FIELDS, validate_numeric_field, toolkit_review_data)
 from .traceability import lab_id, build_traceability
 from catalyst_ingest.readers import source_filename, MAX_ROWS
 
@@ -134,6 +135,23 @@ def approved_payload(revision, approval):
                 if row.get('source_artifact_sha256') != source_hash or any(
                         not isinstance(row.get(t), str) or not row[t] for t in targets):
                     raise ValueError('Invalid standardized values or source binding.')
+                for target in targets:
+                    value = row[target]
+                    if FIELDS[target][0] == 'number':
+                        # Converted decimals may be longer than the original numeric token.
+                        if len(value) > 800 or not re.fullmatch(r'[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?', value):
+                            raise ValueError('Invalid standardized number.')
+                        parsed = Decimal(value)
+                        if not parsed.is_finite() or abs(parsed.adjusted()) > 310:
+                            raise ValueError('Standardized number exceeds the supported range.')
+                        validate_numeric_field(target, parsed)
+                    elif not value.strip() or len(value) > 32768:
+                        raise ValueError('Invalid standardized text.')
+                if trace:
+                    permitted = {trace['dataset']['subject_id'], *(a['local_label'] for a in trace['aliases']
+                        if a['lab'] == trace['source_lab'])}
+                    if any(row.get(key) is not None and row[key] not in permitted for key in ('specimen_id', 'model_id')):
+                        raise ValueError('Standardized subject labels do not match declared lineage.')
         elif preview['normalization'].get('method') == 'preserve-files-with-context/1':
             if rows or preview.get('data_status') != 'original_files_only' or preview['normalization'].get('executed') is not False:
                 raise ValueError('Files-only mode cannot claim standardized results.')
@@ -144,8 +162,21 @@ def approved_payload(revision, approval):
                     or preview['entity'] != 'university-of-rochester' or preview['modality'] != 'reactor'
                     or preview['standardized'].get('kind') != 'toolkit_gc_processing_revision'):
                 raise ValueError('Toolkit processing provenance does not match.')
+            if (original.get('artifact_sha256s') != [a['sha256'] for a in preview['artifacts'] if a['format'] != 'binary']
+                    or original.get('validation', {}).get('embedded_raw_values_match') is not True
+                    or any(i.get('severity') == 'error' and i.get('code') not in (
+                        'DRAFT_MAPPING', 'PRODUCER_VERSION_UNRECORDED', 'ACQUISITION_CONTEXT_REVIEW')
+                        for i in original['issues'])):
+                raise ValueError('Toolkit source review contains unresolved evidence or source conflicts.')
+            expected, time_axis = toolkit_review_data(original['data'], context.get('intervalMin'))
+            if trace:
+                for row in expected['rows']:
+                    row.update(canonical_subject_id=trace['dataset']['subject_id'], canonical_dataset_id=trace['dataset']['id'])
+            if (preview['standardized'] != expected or preview['scientific_processing'] !=
+                    dict(original['processing'], time_axis=time_axis)):
+                raise ValueError('Toolkit results or nominal time axis differ from the preserved source review.')
         else:
             raise ValueError('Unsupported normalization method. Use a compatible application version.')
         return payload
-    except (ValueError, KeyError, TypeError, AttributeError, OverflowError):
+    except (ValueError, KeyError, TypeError, AttributeError, OverflowError, InvalidOperation):
         raise InputError('This exact revision must have valid provenance, source metadata, mapping, lineage, and approval before transfer.') from None

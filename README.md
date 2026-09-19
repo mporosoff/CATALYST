@@ -1,22 +1,25 @@
 # CATALYST
 
-Local desktop upload, review, and standardization workspace for catalysis data, with a direct SciSure/eLabNext sandbox connector. The desktop application is the current implementation target; the earlier hosted web prototype is retained as historical source.
+Local desktop upload, download, review, and standardization workspace for catalysis data, with a direct SciSure/eLabNext connector. The desktop application is the current implementation target; the earlier hosted web prototype is retained as historical source.
 
 ## Desktop application — Windows and Mac
 
 Download the portable Windows EXE or the appropriate Mac DMG from [GitHub Releases](https://github.com/mporosoff/CATALYST/releases). No separate Python installation is needed. To update, close the app and replace its application file. Developers can run `python -m catalyst_desktop` with Python 3.12+ and Tk after installing `requirements-desktop.txt`. Builds contain no token or research data.
 
-The app supports offline CSV/XLSX/JSON table selection, original images and native supporting files, explicit versioned mappings, scientific-context validation, preview, immutable revision approval, direct verified SciSure uploads, saved-review history, and browsing experiment file attachments. Image-only submissions have a dedicated imaging modality and preserve-only review. It uses no hosted processing backend, AI service, Cloudflare service, or local research-data cache. Original files and approved records go directly to SciSure. Optional remembered tokens live in the operating system credential store.
+The app supports offline CSV/XLSX/JSON table selection, original images and native supporting files, explicit versioned mappings, scientific-context validation, preview, immutable revision approval, direct checksum-verified SciSure uploads, saved-review history, and experiment attachment downloads. Image-only submissions have a dedicated imaging modality and preserve-only review. It uses no hosted processing backend, AI service, Cloudflare service, or automatic local research-data cache. Original files and approved records go directly to SciSure; users can explicitly save individual attachments or a verified review ZIP. Optional remembered tokens live in the operating system credential store, separately for each server.
 
 - [Desktop quick start](docs/desktop-quickstart.md)
 - [Six-lab sample lineage and measurement workflow](docs/consortium-workflow.md)
 - [Components, boundaries, tests, and packaging](docs/desktop-development.md)
 - [SciSure integration audit and datatype readiness](docs/scisure-integration-review.md)
+- [Version 0.8.0 review, repairs, and checks](docs/desktop-audit-0.8.md)
 - [Selected SciSure configuration and guarded schema setup](docs/scisure-configuration.md)
 
-Version 0.6 introduces a complete visual redesign: a forest-green sidebar, warm neutral surfaces, original line icons, rounded controls with keyboard focus states, file cards, grouped context, and a quieter review workflow. Saved records has separate review, original-file, and detail views with independent scrolling. The portable Windows EXE, Mac disk images, and reviewed SciSure material-schema installer remain available. XRD, XAFS/XANES, TPR/TPD/TPO, CO uptake, and computational table imports have explicit contextual validation. Native inventory publication and Used/Generated links still need implementation and live validation; schema setup and inspecting a protocol version do not enable those links.
+Version **0.8.0** adds a user-entered SciSure server URL, per-server token storage, individual attachment saving, and **Saved records → Saved reviews → More actions → Download review package…**. The ZIP contains verified original bytes, the approved review with mapping/context/provenance, the transfer receipt, and standardized JSON plus a convenience CSV when rows exist. The sandbox remains the default. Other servers require an explicitly entered HTTPS DNS hostname on standard port 443 and a token valid for that server; SciSure permissions determine which records each token can read or write.
 
-Run `python -m unittest discover -s tests -v` and `python scripts/test-desktop-gui.py` for synthetic component and native-widget checks. The desktop build is sandbox-only. Synthesis/spectroscopy use explicit table mappings; Rochester toolkit results are imported with provenance, not independently recalculated.
+The review also repairs source-precision loss, cached-formula interpretation, incomplete toolkit-result checks, stored-review consistency, and stale/archived transfer reads. The existing sidebar, grouped context, separate saved-record views, and technique-specific validation remain. Native inventory publication and Used/Generated links still need implementation and live validation; schema setup and inspecting a protocol version do not enable those links.
+
+Run `python -m unittest discover -s tests -v` and `python scripts/test-desktop-gui.py` for synthetic component and native-widget checks. No authenticated live SciSure verification was performed during the 0.8.0 review. Synthesis/spectroscopy use explicit table mappings; Rochester toolkit results are imported with provenance, not independently recalculated. Crash recovery for unfinished transfers remains manual, and reviewer names are self-reported rather than cryptographically authenticated.
 
 ## Historical web prototype
 

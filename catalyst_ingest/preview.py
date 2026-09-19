@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, localcontext
 import hashlib
 import json
 from pathlib import Path
@@ -98,7 +98,9 @@ def _raw_preview(artifact, profile, name):
                 value = source.get('value')
                 if value is None and 'formula' not in source:
                     continue  # A missing channel measurement never becomes zero.
-                normalized = _decimal(source.get('lexical_value') if source.get('source_type') == 'n' else value)
+                # A formula's lexical value is its unverified saved result, not a source observation.
+                normalized = None if 'formula' in source else _decimal(
+                    source.get('lexical_value') if source.get('source_type') == 'n' else value)
                 row['measurements'].append({'channel': channel['source_label'], 'species_candidate': channel['species'],
                     'detector': channel['detector'], 'quantity': metric, 'source_value': value,
                     'numeric_value_decimal': normalized, 'unit': None,
@@ -137,13 +139,20 @@ def _processed_preview(artifact, profile, name):
         if 'formula' in source:
             field.update(canonical_field=profile['source_field_renames'].get(key, key), formula=source['formula'],
                          value_decimal=None, status='unavailable_formula_not_evaluated')
-        else:
+        elif key in profile['literal_settings']:
             rule = profile['literal_settings'][key]
-            number = _decimal(source.get('value'))
+            number = _decimal(source.get('lexical_value') if source.get('source_type') == 'n' else source.get('value'))
+            with localcontext() as precision:
+                precision.prec = 800
+                converted = str(Decimal(number) * Decimal(rule['factor'])) if number is not None else None
             field.update(canonical_field=rule['target'], source_unit=rule['source_unit'], unit=rule['unit'],
                          context=rule['context'], rule=f"multiply/{rule['factor']}",
-                         value_decimal=str(Decimal(number) * Decimal(rule['factor'])) if number is not None else None,
+                         value_decimal=converted,
                          status='normalized_literal' if number is not None else 'invalid_numeric_source')
+        else:
+            # A values-only export does not establish how a derived result was calculated.
+            field.update(canonical_field=profile['source_field_renames'][key], value_decimal=None,
+                         status='unavailable_partner_calculation_not_reproduced')
         fields.append(field)
     rows = []
     for address in processed['cells']:

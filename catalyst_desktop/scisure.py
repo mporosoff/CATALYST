@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 from http.client import HTTPException
+from email.utils import parsedate_to_datetime
+import ipaddress
+import math
 import re
 import ssl
 import time
@@ -21,9 +24,53 @@ class SciSureError(Exception):
         self.retry_after = retry_after
 
 def tenant_origin(value):
-    if value.rstrip('/') != SANDBOX:
-        raise SciSureError('This release connects only to the verified sandbox.elabjournal.com tenant.')
-    return SANDBOX
+    """Canonical HTTPS origin explicitly chosen by the user; never infer a tenant."""
+    message = 'Enter your SciSure server as https://hostname, without a sign-in path, user information, or query. Only standard HTTPS (port 443) is supported.'
+    if not isinstance(value, str) or any(ord(c) < 32 or ord(c) > 126 for c in value):
+        raise SciSureError(message)
+    value = value.strip()
+    try:
+        parts = urlsplit(value)
+        host, port = parts.hostname, parts.port
+    except ValueError:
+        raise SciSureError(message) from None
+    if (parts.scheme.lower() != 'https' or not host or parts.username is not None
+            or parts.password is not None or parts.path not in ('', '/') or '?' in value or '#' in value
+            or '\\' in value or '%' in value or port not in (None, 443)
+            or parts.netloc.lower() not in (host, host + ':443')
+            or len(host) > 253 or '.' not in host
+            or any(not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', label) for label in host.split('.'))
+            or host.endswith(('.localhost', '.local', '.internal')) or host.rsplit('.', 1)[-1].isdigit()):
+        raise SciSureError(message)
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    else:
+        raise SciSureError(message)
+    return 'https://' + host
+
+
+def token_value(value):
+    if (not isinstance(value, str) or not value.strip() or len(value) > 8192
+            or any(ord(c) < 33 or ord(c) > 126 for c in value.strip())):
+        raise SciSureError('Enter the SciSure API token without spaces or line breaks.')
+    return value.strip()
+
+
+def api_parts(path):
+    if not isinstance(path, str):
+        raise SciSureError('Unsupported SciSure operation.')
+    try:
+        parts = urlsplit(path)
+        decoded = unquote(parts.path)
+    except ValueError:
+        raise SciSureError('Unsupported SciSure operation.') from None
+    if (parts.scheme or parts.netloc or parts.fragment or not parts.path.startswith('/api/v1/')
+            or '..' in decoded or '\\' in decoded or '%' in decoded
+            or any(ord(c) < 32 or ord(c) == 127 for c in path + decoded)):
+        raise SciSureError('Unsupported SciSure operation.')
+    return parts
 
 def remote_id(value):
     if isinstance(value, bool) or not isinstance(value, (str, int)) or not re.fullmatch(r'[1-9]\d{0,15}', str(value)):
@@ -40,9 +87,7 @@ class NoRedirects(HTTPRedirectHandler):
 class SciSureClient:
     def __init__(self, token, origin=SANDBOX, transport=None, sleep=None):
         self.origin = tenant_origin(origin)
-        if not isinstance(token, str) or not token.strip() or len(token) > 8192 or any(ord(c) < 33 or ord(c) > 126 for c in token.strip()):
-            raise SciSureError('Enter the SciSure API token without spaces or line breaks.')
-        self._token = token.strip()
+        self._token = token_value(token)
         self._transport = transport
         self._opener = None
         self._sleep = sleep or time.sleep
@@ -51,15 +96,8 @@ class SciSureClient:
         return f'SciSureClient(origin={self.origin!r}, token=<redacted>)'
 
     def request(self, path, method='GET', data=None, binary=False):
-        try:
-            parts = urlsplit(path)
-            decoded = unquote(parts.path)
-        except (ValueError, TypeError, AttributeError):
-            raise SciSureError('Unsupported SciSure operation.') from None
-        if (parts.scheme or parts.netloc or parts.fragment or not parts.path.startswith('/api/v1/')
-                or '..' in decoded or '\\' in decoded or '%' in decoded
-                or any(ord(c) < 32 or ord(c) == 127 for c in path + decoded)
-                or method not in ('GET', 'POST') or (method == 'GET' and data is not None)):
+        api_parts(path)
+        if method not in ('GET', 'POST') or (method == 'GET' and data is not None):
             raise SciSureError('Unsupported SciSure operation.')
         write = method != 'GET'
         headers = {'Authorization': self._token, 'X-Requested-With': 'Swagger',
@@ -92,15 +130,28 @@ class SciSureClient:
                     break
                 retry = response_headers.get('Retry-After', response_headers.get('retry-after', str(2 ** attempt)))
                 try: delay = max(0, int(retry))
-                except (TypeError, ValueError): delay = 2 ** attempt
+                except (TypeError, ValueError):
+                    try:
+                        when = parsedate_to_datetime(retry)
+                        if when.tzinfo is None:
+                            raise ValueError('Retry date must include its time zone.')
+                        delay = max(0, math.ceil(when.timestamp() - time.time()))
+                    except (TypeError, ValueError, OverflowError):
+                        delay = 2 ** attempt
                 if write or attempt == 2 or delay > 10:
                     raise SciSureError(f'SciSure rate limited the request. Wait {delay} seconds before checking or retrying.',
                         False, 429, delay)
                 self._sleep(delay)
             if not 200 <= status < 300:
                 rejected = status in (400, 401, 403, 404, 405, 409, 413, 415, 422)
-                raise SciSureError(f'SciSure returned HTTP {status}. Check the token, permissions, and selected destination.',
-                    write and not rejected, status)
+                message = {
+                    401: 'SciSure rejected the API token (HTTP 401). Check that it belongs to this server and has not expired or been revoked.',
+                    403: 'The token account does not have permission for this operation (HTTP 403). Ask a SciSure administrator for access to the selected group or experiment.',
+                    404: 'The SciSure record or API endpoint is unavailable (HTTP 404). Refresh the experiment list and verify the server URL.',
+                }.get(status, f'SciSure returned HTTP {status}. Check the token, permissions, and selected destination.')
+                if 300 <= status < 400:
+                    message = f'SciSure returned a redirect (HTTP {status}). Enter the exact HTTPS server URL; tokens are never forwarded to a redirected address.'
+                raise SciSureError(message, write and not rejected, status)
             if len(content) > MAX_FILE:
                 raise SciSureError('SciSure response exceeds the supported size.', write)
             length = response_headers.get('Content-Length', response_headers.get('content-length'))
@@ -117,9 +168,11 @@ class SciSureClient:
                 else 'SciSure could not be read. Check the connection and try again.', write) from None
 
     def list(self, path):
-        if any(k in ('$page', '$records') for k, _ in parse_qsl(urlsplit(path).query)):
+        parts = api_parts(path)
+        if any(k.casefold() in ('$page', '$records', 'opts.paging.currentpage', 'opts.paging.maxrecords')
+                for k, _ in parse_qsl(parts.query, keep_blank_values=True)):
             raise SciSureError('Pagination parameters are managed by the SciSure client.')
-        route = urlsplit(path).path
+        route = parts.path
         # A foreign user/group/type ID is shared by many records. Never use it to deduplicate pages.
         own_key = next((key for pattern, key in (
             (r'/api/v1/experiments/sections/\d+/files', 'experimentFileID'),
@@ -191,7 +244,7 @@ class SciSureClient:
                 or e.get('template') is not False):
             raise SciSureError('This experiment is unavailable in the selected group.')
         if writable and e.get('signatureStatus') != 'None':
-            raise SciSureError('This experiment is signed or locked. Choose an unsigned test experiment.')
+            raise SciSureError('This experiment is signed or locked. Choose an unsigned experiment for uploads; it remains available for downloads.')
         self.assert_group(current_group)
         return dict(tenant=self.origin, group_id=current_group, experiment_id=eid,
             study_id=remote_id(e.get('studyID')), project_id=remote_id(e.get('projectID')),

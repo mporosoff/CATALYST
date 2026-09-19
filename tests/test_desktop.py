@@ -262,7 +262,7 @@ class PublicationTests(unittest.TestCase):
         self.publisher.publish(third,third.approve('Tester','Reviewed',True),[self.source])
 
     def test_untrusted_destination_or_api_path_never_receives_token(self):
-        for origin in ('http://sandbox.elabjournal.com','https://evil.example','https://sandbox.elabjournal.com.evil.example'):
+        for origin in ('http://sandbox.elabjournal.com','https://sandbox.elabjournal.com@evil.example','https://sandbox.elabjournal.com/path'):
             with self.assertRaises(SciSureError): SciSureClient('synthetic-token',origin,self.api)
         for path in ('https://evil.example','//evil.example/api/v1/a','/api/v1/../auth','/api/v1/%2e%2e/auth'):
             with self.assertRaises(SciSureError): self.client.request(path)

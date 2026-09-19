@@ -68,11 +68,11 @@ def configuration_document():
 
 
 def _workspace(client, group_id):
-    active = client.request('/api/v1/groups/active')
-    if active.get('groupID') != group_id:
+    active = client.object('/api/v1/groups/active')
+    if remote_id(active.get('groupID')) != group_id:
         raise SciSureError('The active group changed. Reconnect and prepare configuration again.')
     name = active.get('name') or active.get('groupName') or ''
-    if name.strip().casefold() != 'catalyst':
+    if not isinstance(name, str) or name.strip().casefold() != 'catalyst':
         raise SciSureError('Configuration is restricted to the CATALYST group. Select it as your working group in SciSure and reconnect.')
     return dict(tenant=client.origin, group_id=remote_id(group_id), group_name=name)
 
@@ -115,9 +115,13 @@ def _field_conflicts(actual, expected):
     errors = []
     for key in ('key', 'sampleDataType', 'required'):
         if actual.get(key) != expected.get(key): errors.append(expected['key'] + ': incompatible ' + key + '.')
-    if set(actual.get('optionValues') or []) != set(expected.get('optionValues') or []):
+    options = actual.get('optionValues') or []
+    if (not isinstance(options, list) or not all(isinstance(value, str) for value in options)
+            or len(set(options)) != len(options) or set(options) != set(expected.get('optionValues') or [])):
         errors.append(expected['key'] + ': option values differ from the controlled schema.')
-    if actual.get('validationScript') or actual.get('MaskRegExp') or (actual.get('sampleTypeSection') or {}).get('sectionConditions'):
+    section = actual.get('sampleTypeSection')
+    if (actual.get('validationScript') or actual.get('MaskRegExp') or (section is not None
+            and (not isinstance(section, dict) or section.get('sectionConditions')))):
         errors.append(expected['key'] + ': custom validation/conditions require explicit review; no script will be executed.')
     return errors
 
@@ -190,8 +194,8 @@ class SchemaInstaller:
     def _guard(self):
         _workspace(self.client, self.group_id)
         # Sample-type creation targets the account's working/primary group. Require agreement.
-        account = self.client.request('/api/v1/users/getCurrentUserInfo')
-        if account.get('groupId') != self.group_id or account.get('isBlocked') is not False:
+        account = self.client.object('/api/v1/users/getCurrentUserInfo')
+        if remote_id(account.get('groupId')) != self.group_id or account.get('isBlocked') is not False:
             raise SciSureError('The token account and active CATALYST group do not agree, or the account is blocked. Setup is paused.')
 
     def _step(self, key, find, path, body):

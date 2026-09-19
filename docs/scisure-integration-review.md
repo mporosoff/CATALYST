@@ -1,10 +1,14 @@
-# CATALYST / SciSure audit — 0.7.0
+# CATALYST / SciSure integration review — 0.8.0
 
-Reviewed 12 September 2026. Scope: the Windows/macOS application, ingestion, normalization, consortium identities, saved-record reading, publication/retries, schema configuration, credentials, packaging, and relevant official SciSure/eLabNext documentation. The old Sites application is historical source, not the desktop runtime.
+Updated 19 September 2026. Scope: the Windows/macOS application, ingestion, normalization, consortium identities, saved-record reading and downloads, publication/retries, schema configuration, credentials, and packaging. The official API references and historical 0.7.0 findings below were recorded in the 12 September review; the 0.8.0 review checks the current implementation and synthetic API fixtures. The old Sites application is historical source, not the desktop runtime.
 
-**Assessment:** the file/review connector is better protected against ambiguous input, incomplete transfers and inconsistent remote records. This remains a sandbox development release. No authenticated live SciSure requests or writes were performed in this audit. Native inventory publication and Used/Generated links are unfinished; this release must not be represented as complete production integration for every datatype.
+**Assessment:** the file/review connector now supports an explicitly entered SciSure HTTPS server, tokens stored separately by server, and user-selected downloads of individual attachments or complete verified review ZIPs. The sandbox remains the default. Scientific-source, saved-review, transfer, and stale-state checks have been strengthened. This remains a development release: no authenticated live SciSure requests or writes were performed in the 0.8.0 audit. Native inventory publication and Used/Generated links are unfinished; this release is not complete production integration for every datatype.
 
-## Repairs made
+## Current 0.8.0 repairs and capabilities
+
+See [the focused 0.8.0 audit notes](desktop-audit-0.8.md) for concrete findings, repairs, and regression suites. The current release preserves exact JSON/workbook numeric evidence, avoids treating cached formulas as observations, validates toolkit result completeness and physical ranges, accepts formatting-only spreadsheet cells, checks stored value/subject/time-axis consistency, rechecks changing remote records before success, and normalizes API IDs. Explicit downloads save only to a user-selected path; they do not introduce an automatic local research cache.
+
+## Historical 0.7.0 repairs retained
 
 | Area | Failure found | Repair and regression evidence |
 | --- | --- | --- |
@@ -29,11 +33,11 @@ Excel formatting can differ from the stored numeric meaning. See [Microsoft's da
 
 | Operation | Documented contract | CATALYST behavior |
 | --- | --- | --- |
-| Authentication | Token in Authorization; HTTPS; account/group permissions enforced by SciSure. | Fixed sandbox origin, TLS verification, no redirects/environment proxy, no token in URLs or review packets. Optional native OS credential storage. |
+| Authentication | Token in Authorization; HTTPS; account/group permissions enforced by SciSure. | Sandbox default or user-entered HTTPS DNS origin on port 443; TLS verification; no redirects/environment proxy; no token in URLs or review packets. Optional native OS credentials are separate by server. Changing server clears token/connection state. |
 | Pagination | Non-sample endpoints use totalRecords/maxRecords; hasNextPage is not universal. | Read every bounded page; reject incomplete or inconsistent results. |
 | Experiment | ExperimentLarge exposes IDs, study/project/group, deleted/template and signatureStatus. Workflow detail is a separate expansion. | Bind to the reviewed destination and require signatureStatus None for writes; recheck before writes. Signed experiments remain readable. |
 | Sections / upload | FILE and FILES are documented types. Raw binary upload returns an integer file ID. | Dedicated revision section; approved manifest, unchanged originals, completion receipt last. Download/hash verification before recording success. |
-| Retrieval | File metadata includes IDs, names, size, origin and hash/revision fields. Embedded images, legacy Excel/canvas and other sections have distinct endpoints. | Browse FILE/FILES/CUSTOM attachments, keeping Office revisions distinct by ID. No token forwarding to a separate eLABHybrid host. |
+| Retrieval | File metadata includes IDs, names, size, origin and hash/revision fields. Embedded images, legacy Excel/canvas and other sections have distinct endpoints. | Browse and explicitly save FILE/FILES/CUSTOM attachments, keeping Office revisions distinct by ID. Export completed CATALYST reviews as verified ZIPs with originals, approval/context/mapping, receipt, and standardized JSON/CSV. No token forwarding to a separate eLABHybrid host. |
 | Native configuration | Structured sample metadata needs the correct sampleTypeMetaID; required values/quantities need deliberate population. | Inspect/discover the selected Material v1 schema and its 16 fields. A reviewed additive installer creates missing schema records; it does not publish research inventory. |
 | Samples / protocols | Used/Generated links and published protocol version IDs have distinct endpoints. | Keep declared lineage in review packages; do not claim it is already native inventory or a verified protocol binding. |
 
@@ -56,14 +60,20 @@ CSV, XLSX and flat-record JSON are the interpreted table formats. Preserving oth
 
 ## Remaining limits and release gates
 
-1. **Live sandbox acceptance:** verify the intended account/group, native bindings, collaboration, unsigned/read-only behavior, and an approved synthetic write/hash read-back with interruption and permission rejection. Documentation and mocked responses cannot establish live permissions or tenant behavior.
+1. **Live server acceptance:** verify the intended server/account/group, native bindings, collaboration, unsigned/read-only behavior, and an approved synthetic upload/download with hash read-back, interruption, and permission rejection. Documentation and mocked responses cannot establish live permissions or tenant behavior. Enabling a server URL is not evidence that this deployment was tested against it.
 2. **Native inventory is unfinished:** implement reviewed sample creation/reuse, required fields/quantities, published protocol bindings and Used/Generated links before promising integrated inventory. Schema installation alone does not enable them. See [the selected configuration](scisure-configuration.md).
 3. **Recovery/concurrency is not atomic:** ordinary section/file calls are not a transaction or idempotency registry. Same-session unknown-write reconciliation is supported. After exit/crash, owners must reconcile incomplete SciSure records. Manual deletion, editing or permission changes can invalidate records. A new revision is not a substitute for reconciling an unfinished transfer.
 4. **Visibility and size limits:** the catalog covers accessible CATALYST reviews in the active group, not inaccessible/native-only records or other groups. Limits are 250 reviews, 1,000 records per list, 1,000 browsable attachments, six originals, 20 MiB per file/review, 40 MiB combined originals, and 200,000 combined source cells. Large spectra/images and consortium-scale indexing need a reviewed streaming/index design. Limits fail explicitly.
 5. **Identity boundaries:** shared tokens mean shared permissions, not independent reviewer authentication or partner isolation. An authorized account can replace both content and its hash. SciSure signing/audit controls remain authoritative. OS-vault storage follows the logged-in OS account's access rules; it does not protect against all code running as that user. See [keyring backend considerations](https://pypi.org/project/keyring/25.7.0/) and [SciSure signing](https://support.elabnext.com/hc/en-us/articles/36677169103508-Signing-Experiments).
-6. **Distribution/old infrastructure:** EXE/DMG builds remain unsigned/not notarized; only sandbox is enabled. Retire the earlier hosted prototype and any credential left there through owner controls; this audit does not claim decommissioning/revocation. The desktop creates no research cache/database/automatic log. Unsent work remains in memory, subject to normal OS swap/crash behavior.
+6. **Distribution/old infrastructure:** EXE/DMG builds remain unsigned/not notarized. The sandbox is the default; another server must be supplied explicitly as an HTTPS DNS origin on port 443. Retire the earlier hosted prototype and any credential left there through owner controls; this audit does not claim decommissioning/revocation. The desktop creates no automatic research cache/database/log. Explicit downloads and their temporary save files use the location the user chooses. Unsent work remains in memory, subject to normal OS swap/crash behavior.
 
-## Verification
+## Current verification
+
+The 0.8.0 review passed 225 Python unit/integration tests on Python 3.13.15, the final Windows native GUI check, and the portable Windows executable's packaged self-tests in both the build output and an isolated folder containing the executable alone. Details and acceptance limits are recorded in [the release audit notes](desktop-audit-0.8.md). No fresh Mac build or authenticated live SciSure verification was performed. Cryptographic reviewer identity and comprehensive security certification are not claimed.
+
+## Historical 0.7.0 verification
+
+The following results describe the previous 0.7.0 review and are not current 0.8.0 release totals:
 
 - **157 synthetic unit/integration tests pass**, including 41 new tests with multiple adversarial cases. Coverage also verifies that combined input limits stop loading the remainder of an oversized bundle. Existing tests cover six-lab identities, modality contexts, raw/image/native round trips, approval invalidation, schema installation and rejected/unknown transfers.
 - Native Tk checks pass for scrolling, narrow-window layout, mapping, files, review/approval, lineage, schema review/application, retry guards, rejected sign-in and cleared disconnected state. This is not a screen-reader certification.

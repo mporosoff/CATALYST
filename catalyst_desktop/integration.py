@@ -18,10 +18,8 @@ def inspect_setup(client, group_id, progress=lambda _: None, *, experiment_id=No
         except SciSureError as e:
             report['checks'].append(dict(name=name, status='not verified', detail=str(e)))
             return None
-    active = client.request('/api/v1/groups/active')
-    if not isinstance(active, dict) or active.get('groupID') != group_id:
-        raise SciSureError('The active group changed. Reconnect before inspecting setup.')
-    user = check('Current SciSure account', lambda: client.request('/api/v1/users/getCurrentUserInfo'))
+    client.assert_group(group_id)
+    user = check('Current SciSure account', lambda: client.object('/api/v1/users/getCurrentUserInfo'))
     if isinstance(user, dict):
         report['token_account'] = dict(user_id=remote_id(user.get('userID')), name=user.get('fullName') or
             ' '.join(str(user.get(k) or '') for k in ('firstName', 'lastName')), blocked=user.get('isBlocked'),
@@ -40,9 +38,13 @@ def inspect_setup(client, group_id, progress=lambda _: None, *, experiment_id=No
         for item in types:
             sid = remote_id(item.get('sampleTypeID'))
             progress('Inspecting native fields for SciSure sample type ' + str(sid) + '…')
-            detail = check(f'Sample type {sid}', lambda: client.request(f'/api/v1/sampleTypes/{sid}'))
+            detail = check(f'Sample type {sid}', lambda: client.object(f'/api/v1/sampleTypes/{sid}'))
+            if detail is not None and (detail.get('sampleTypeID') != sid or detail.get('groupID') != group_id):
+                raise SciSureError('SciSure returned a different sample type or group during setup inspection. Reconnect and inspect again.')
             fields = check(f'Sample type {sid} fields', lambda: client.list(f'/api/v1/sampleTypes/{sid}/meta'))
             if not isinstance(detail, dict): continue
+            if fields is not None and any(f.get('sampleTypeID') != sid for f in fields):
+                raise SciSureError('SciSure returned metadata for a different sample type during setup inspection.')
             report['sample_types'].append(dict(id=sid, name=detail.get('name'), group_id=detail.get('groupID'),
                 deleted=detail.get('deleted'), quantity_required=detail.get('quantityRequired'),
                 quantity_type=detail.get('defaultQuantityType'), unit=detail.get('defaultUnit'),
@@ -53,7 +55,7 @@ def inspect_setup(client, group_id, progress=lambda _: None, *, experiment_id=No
                     for f in fields] if fields is not None else None))
     if sample_id is not None:
         sid = remote_id(sample_id)
-        sample = check('Native sample reference', lambda: client.request(f'/api/v1/samples/{sid}?%24expand=meta,parents'))
+        sample = check('Native sample reference', lambda: client.object(f'/api/v1/samples/{sid}?%24expand=meta,parents'))
         if isinstance(sample, dict):
             if sample.get('sampleID') != sid:
                 raise SciSureError('SciSure returned a different sample than requested.')
@@ -62,10 +64,10 @@ def inspect_setup(client, group_id, progress=lambda _: None, *, experiment_id=No
                 parents=sample.get('parents'), parent_sample_id=sample.get('parentSampleID'))
     if protocol_version_id is not None:
         pid = remote_id(protocol_version_id)
-        protocol = check('Native protocol version', lambda: client.request(f'/api/v1/protocols/version/{pid}?%24expand=signingStatus'))
+        protocol = check('Native protocol version', lambda: client.object(f'/api/v1/protocols/version/{pid}?%24expand=signingStatus'))
         if isinstance(protocol, dict):
-            if protocol.get('protVersionID') != pid:
-                raise SciSureError('SciSure returned a different protocol version than requested.')
+            if protocol.get('protVersionID') != pid or protocol.get('groupID') != group_id:
+                raise SciSureError('SciSure returned a different protocol version or group than requested.')
             report['protocol_reference'] = dict(protocol_id=protocol.get('protID'), version_id=pid,
                 version=protocol.get('version'), name=protocol.get('name'), group_id=protocol.get('groupID'),
                 published=protocol.get('draft') is False and protocol.get('deleted') is False,
@@ -77,8 +79,7 @@ def inspect_setup(client, group_id, progress=lambda _: None, *, experiment_id=No
         'Verify experiment collaboration and group/subgroup roles for all six labs using their intended accounts.',
         'Perform an approved synthetic write/read-back test; successful reads alone do not verify write permission.',
     ]
-    if client.request('/api/v1/groups/active').get('groupID') != group_id:
-        raise SciSureError('The active group changed during inspection. Discard this result and reconnect.')
+    client.assert_group(group_id)
     return report
 
 

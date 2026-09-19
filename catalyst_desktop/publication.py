@@ -21,18 +21,20 @@ def require_tenant_file(metadata):
 def unique(rows, key):
     if len(rows) > 1:
         raise SciSureError('Duplicate remote records were found. Resolve them in SciSure before continuing.')
-    return remote_id(rows[0][key]) if rows else None
+    return remote_id(rows[0].get(key)) if rows else None
 
 def validate_approval(revision, approval):
     return approved_payload(revision, approval)
 
 
 def file_metadata(metadata, size=None, checksum=None, experiment=None):
+    if metadata.get('deleted') is True or metadata.get('archived') is True:
+        raise SciSureError('A SciSure file was archived or deleted. Refresh before continuing.')
     if type(metadata.get('fileSize')) is not int or not 1 <= metadata['fileSize'] <= MAX_FILE:
         raise SciSureError('A SciSure file has an unsupported size. Transfer is paused.')
     if size is not None and metadata['fileSize'] != size:
         raise SciSureError('A SciSure file size differs from the approved original. Transfer is paused.')
-    if experiment is not None and metadata.get('experimentID', experiment) != experiment:
+    if experiment is not None and remote_id(metadata.get('experimentID', experiment)) != experiment:
         raise SciSureError('SciSure returned a file from another experiment. Transfer is paused.')
     declared = metadata.get('SHA256Hash')
     # The API does not promise a hash encoding. Compare it only when it is a SHA-256 hex digest.
@@ -48,6 +50,32 @@ def download(client, base, metadata, *, size=None, checksum=None, experiment=Non
         raise SciSureError('A downloaded file failed its size or checksum integrity check.')
     file_metadata(metadata, len(content), digest(content), experiment)
     return content
+
+
+def _file_by_id(files, identifier):
+    matches = [f for f in files if remote_id(f.get('experimentFileID')) == identifier]
+    if len(matches) != 1:
+        raise SciSureError('A SciSure file is missing or duplicated. Refresh before continuing.')
+    return matches[0]
+
+
+def _file_snapshot(files):
+    # Ignore display/access fields which may change when downloading, but bind all
+    # metadata that establishes a file's identity, version, owner, and integrity.
+    keys = ('realName', 'fileSize', 'experimentID', 'SHA256Hash', 'origin',
+        'parentExperimentFileID', 'deleted', 'archived')
+    records = [(remote_id(f.get('experimentFileID')), {k: f.get(k) for k in keys}) for f in files]
+    return encode(sorted(records, key=lambda record: record[0]))
+
+
+def _review_section(client, destination, sid):
+    sections = client.list(f'/api/v1/experiments/{destination["experiment_id"]}/sections')
+    selected = [s for s in sections if remote_id(s.get('expJournalID')) == sid
+        and isinstance(s.get('sectionHeader'), str) and s['sectionHeader'].startswith(PREFIX)
+        and s.get('sectionType') in FILE_SECTION_TYPES and s.get('deleted') is False]
+    if len(selected) != 1:
+        raise SciSureError('The selected review does not belong to this experiment or is no longer active.')
+    return selected[0]
 
 class Publisher:
     def __init__(self, client, destination, operations=None):
@@ -110,6 +138,21 @@ class Publisher:
         return self._step(f'file/{section}/{filename}', find,
             lambda: self.client.request(path + '?fileName=' + quote(filename, safe=''), 'POST', data))
 
+    def _check_catalog(self, payload, revision_sha256, progress):
+        from .catalog import load_catalog, check_publication
+        catalog = load_catalog(self.client, self.destination['group_id'], progress)
+        check_publication(payload['preview']['traceability'], catalog)
+        for entry in catalog['entries'] + catalog['pending'] + catalog.get('orphan_sections', []):
+            if entry['revision_id'] == payload['id'] and (entry['destination']['experiment_id'] != self.destination['experiment_id']
+                    or entry.get('revision_sha256', revision_sha256) != revision_sha256):
+                raise InputError('This revision ID already belongs to another destination or different content. Create a new reviewed revision.')
+        profile = payload['preview']['normalization'].get('profile', {})
+        if profile.get('format') == 'catalyst-mapping/1':
+            key = ('entity', 'modality', 'source_format', 'source_version', 'name', 'version')
+            for other_profile in catalog['profiles']:
+                if all(other_profile.get(k) == profile.get(k) for k in key) and digest(encode(other_profile)) != digest(encode(profile)):
+                    raise InputError('This mapping version already has different rules in SciSure. Increase the profile version.')
+
     def publish(self, revision, approval, sources, progress=lambda _: None):
         payload = validate_approval(revision, approval)
         trace = payload['preview'].get('traceability')
@@ -125,21 +168,8 @@ class Publisher:
         if expected != actual:
             raise InputError('The selected source files no longer match the approved revision.')
         self.client.verify_destination(self.destination)
-        from .catalog import load_catalog, check_publication
         progress('Checking sample, procedure, and dataset identities across the active SciSure group…')
-        catalog = load_catalog(self.client, self.destination['group_id'], progress)
-        check_publication(trace, catalog)
-        for entry in catalog['entries'] + catalog['pending']:
-            if entry['revision_id'] == payload['id'] and (entry['destination']['experiment_id'] != self.destination['experiment_id']
-                    or entry['revision_sha256'] != revision.sha256):
-                raise InputError('This revision ID already belongs to another destination or different content. Create a new reviewed revision.')
-        # Detect accidental reuse of a profile version with different rules anywhere in the active group.
-        profile = payload['preview']['normalization'].get('profile', {})
-        if profile.get('format') == 'catalyst-mapping/1':
-            key = ('entity', 'modality', 'source_format', 'source_version', 'name', 'version')
-            for other_profile in catalog['profiles']:
-                if all(other_profile.get(k) == profile.get(k) for k in key) and digest(encode(other_profile)) != digest(encode(profile)):
-                    raise InputError('This mapping version already has different rules in SciSure. Increase the profile version.')
+        self._check_catalog(payload, revision.sha256, progress)
         packet = dict(format='catalyst-desktop-transfer/1', state='prepared',
             revision=payload, revision_sha256=revision.sha256, approval=approval, destination=self.destination)
         packet_bytes = encode(packet)
@@ -147,6 +177,15 @@ class Publisher:
             raise InputError('The review package exceeds the supported 20 MiB transfer size.')
         progress('Preparing the revision section in SciSure…')
         section = self._section(payload['id'])
+        existing = self.client.list(f'/api/v1/experiments/sections/{section}/files')
+        if unique([f for f in existing if f.get('realName') == MANIFEST], 'experimentFileID') is not None:
+            loaded = read_review(self.client, self.destination, section)
+            if loaded['revision'].sha256 != revision.sha256 or encode(loaded['approval']) != encode(approval):
+                raise InputError('This revision already has different content or approval in SciSure. Create a new reviewed revision.')
+            # Canonical ownership was checked by read_review. Display names may
+            # change after reconnecting; retries must reuse the original envelope.
+            packet['destination'] = loaded['destination']
+            packet_bytes = encode(packet)
         progress('Saving the approved review and provenance…')
         manifest_id = self._file(section, MANIFEST, packet_bytes)
         files = []
@@ -158,10 +197,18 @@ class Publisher:
                 sha256=digest(source.content), size_bytes=len(source.content)))
         # Stable receipt permits read-back reconciliation without another write.
         receipt = dict(format='catalyst-desktop-receipt/1', state='complete', revision_id=payload['id'],
-            revision_sha256=revision.sha256, destination=self.destination, section_id=section,
+            revision_sha256=revision.sha256, destination=packet['destination'], section_id=section,
             manifest_id=manifest_id, files=files)
+        # A transfer may take minutes. Recheck shared identities after the upload,
+        # before promoting this pending review to a completed catalog reference.
+        progress('Rechecking shared identities before completing the transfer…')
+        self._check_catalog(payload, revision.sha256, progress)
         progress('Recording the verified transfer receipt…')
         receipt_id = self._file(section, RECEIPT, encode(receipt))
+        progress('Verifying the complete saved review and originals…')
+        verified = read_review(self.client, self.destination, section, with_sources=True)
+        if verified['revision'].sha256 != revision.sha256 or verified['receipt'] != receipt:
+            raise SciSureError('The saved transfer changed during final verification. Check SciSure before retrying.', True)
         return dict(receipt, receipt_id=receipt_id, verified_at=now())
 
 def history(client, destination):
@@ -170,7 +217,7 @@ def history(client, destination):
     results = []
     for s in sections:
         heading = s.get('sectionHeader', '')
-        if not isinstance(heading, str) or not heading.startswith(PREFIX) or s.get('sectionType') not in FILE_SECTION_TYPES or s.get('deleted'):
+        if not isinstance(heading, str) or not heading.startswith(PREFIX) or s.get('sectionType') not in FILE_SECTION_TYPES or s.get('deleted') is not False:
             continue
         sid = remote_id(s['expJournalID'])
         files = client.list(f'/api/v1/experiments/sections/{sid}/files')
@@ -178,30 +225,28 @@ def history(client, destination):
         rid = unique([f for f in files if f.get('realName') == RECEIPT], 'experimentFileID')
         results.append(dict(section_id=sid, revision_id=heading[len(PREFIX):],
             manifest_id=mid, receipt_id=rid, status='Receipt available' if rid else 'Incomplete transfer'))
+    client.verify_destination(destination, writable=False)
     return results
 
 def read_review(client, destination, section_id, with_sources=False):
     client.verify_destination(destination, writable=False)
     sid = remote_id(section_id)
-    sections = client.list(f'/api/v1/experiments/{destination["experiment_id"]}/sections')
-    selected = [s for s in sections if s.get('expJournalID') == sid and isinstance(s.get('sectionHeader'), str) and s['sectionHeader'].startswith(PREFIX)
-            and s.get('sectionType') in FILE_SECTION_TYPES and not s.get('deleted')]
-    if len(selected) != 1:
-        raise SciSureError('The selected review does not belong to this experiment.')
+    selected = _review_section(client, destination, sid)
     base = f'/api/v1/experiments/sections/{sid}/files'
     files = client.list(base)
+    snapshot = _file_snapshot(files)
     mid = unique([f for f in files if f.get('realName') == MANIFEST], 'experimentFileID')
     if mid is None:
         raise SciSureError('The review file is missing from this incomplete transfer.')
     try:
-        packet = strict_loads(download(client, base, next(f for f in files if f.get('experimentFileID') == mid), experiment=destination['experiment_id']))
+        packet = strict_loads(download(client, base, _file_by_id(files, mid), experiment=destination['experiment_id']))
         if not isinstance(packet, dict):
             raise ValueError
         if packet.get('format') != 'catalyst-desktop-transfer/1' or packet.get('state') != 'prepared':
             raise ValueError
         revision = Revision(encode(packet['revision']), packet['revision_sha256'])
         validate_approval(revision, packet['approval'])
-        if selected[0]['sectionHeader'] != PREFIX + revision.value()['id']:
+        if selected['sectionHeader'] != PREFIX + revision.value()['id']:
             raise ValueError
         if any(packet['destination'][k] != destination[k] for k in ('tenant', 'group_id', 'experiment_id', 'study_id', 'project_id')):
             raise ValueError
@@ -211,9 +256,9 @@ def read_review(client, destination, section_id, with_sources=False):
     rid = unique([f for f in files if f.get('realName') == RECEIPT], 'experimentFileID')
     receipt = None
     if rid:
-        require_tenant_file(next(f for f in files if f.get('experimentFileID') == rid))
+        require_tenant_file(_file_by_id(files, rid))
         try:
-            receipt = strict_loads(download(client, base, next(f for f in files if f.get('experimentFileID') == rid), experiment=destination['experiment_id']))
+            receipt = strict_loads(download(client, base, _file_by_id(files, rid), experiment=destination['experiment_id']))
             if (not isinstance(receipt, dict) or receipt.get('format') != 'catalyst-desktop-receipt/1' or receipt.get('state') != 'complete'
                     or receipt.get('revision_sha256') != revision.sha256 or receipt.get('revision_id') != revision.value()['id']
                     or receipt.get('section_id') != sid or receipt.get('manifest_id') != mid
@@ -229,7 +274,7 @@ def read_review(client, destination, section_id, with_sources=False):
                 file_metadata(matching[0], expected['size_bytes'], expected['sha256'], destination['experiment_id'])
                 if (actual['source_name'] != expected['filename'] or actual['sha256'] != expected['sha256']
                         or actual['size_bytes'] != expected['size_bytes'] or actual['remote_name'] != f'{i:02d}-' + expected['filename']
-                        or not any(f.get('experimentFileID') == actual['file_id'] and f.get('realName') == actual['remote_name']
+                        or not any(remote_id(f.get('experimentFileID')) == actual['file_id'] and f.get('realName') == actual['remote_name']
                             and f.get('fileSize') == actual['size_bytes'] for f in files)):
                     raise ValueError
         except (ValueError, TypeError, KeyError, AttributeError):
@@ -240,10 +285,14 @@ def read_review(client, destination, section_id, with_sources=False):
             fid = unique([f for f in files if f.get('realName') == name], 'experimentFileID')
             if fid is None:
                 raise SciSureError('An original is missing from this incomplete transfer. If the original app session is still open, use Send / check transfer there. Otherwise reconcile the incomplete record in SciSure before starting a new revision.')
-            content = download(client, base, next(f for f in files if f.get('experimentFileID') == fid),
+            content = download(client, base, _file_by_id(files, fid),
                 size=metadata['size_bytes'], checksum=metadata['sha256'], experiment=destination['experiment_id'])
             sources.append(Source.from_bytes(metadata['filename'], content, parse=metadata.get('format') != 'binary'))
             check_sources(sources)
+    current_section = _review_section(client, destination, sid)
+    if (current_section['sectionHeader'] != selected['sectionHeader']
+            or _file_snapshot(client.list(base)) != snapshot):
+        raise SciSureError('The saved review or its files changed during retrieval. Refresh before continuing.')
     client.verify_destination(destination, writable=False)
     return dict(revision=revision, approval=packet['approval'], destination=packet['destination'],
         sources=sources, receipt=receipt, state='complete' if receipt else 'incomplete',
