@@ -33,6 +33,13 @@ RED = '#9B2C2C'
 FONT = 'Helvetica Neue' if sys.platform == 'darwin' else 'Segoe UI'
 
 
+def readable_note(saved):
+    if not saved.get('readable_warning'):
+        return ''
+    return ('\n\nThe record is saved, but its readable copy in SciSure could not be written '
+        f"({saved['readable_warning']}). Settings → Coordinator tools → “Write readable copies” adds it later.")
+
+
 def friendly(error):
     if isinstance(error, (StoreError, SciSureError, ids.IdError, records.RecordError)):
         return str(error)
@@ -861,7 +868,7 @@ class ShipmentDialog(tk.Toplevel):
         self.save_button.state(['disabled'])
         def done(saved):
             self.destroy()
-            app.info(f"Shipment {saved['record']['id']} logged.")
+            app.info(f"Shipment {saved['record']['id']} logged." + readable_note(saved))
             app.open_sample(self.sample['experiment_id'])
         def failed(error):
             if self.winfo_exists():
@@ -1265,7 +1272,7 @@ class SampleForm(Page):
             warning = ('\n\nNote: another sample with the same ID appeared at the same moment. Tell the coordinator.'
                 if saved['duplicate_warning'] else '')
             app.info(f'Saved as {sample_id}.\n\nWrite this ID on the vial. Everyone in the consortium can now find it '
-                f'and attach their data to it.{warning}')
+                f'and attach their data to it.{warning}' + readable_note(saved))
             app.refresh(then=lambda: app.open_sample(sample_id))
         def failed(error):
             self._saving = False
@@ -1491,7 +1498,7 @@ class UploadForm(Page):
                 app.settings.clear_draft(self.DRAFT)
                 self.save_draft()
             app.info(f"Saved {saved['record']['id']} with {len(saved['record']['files'])} file(s). Every file was checked "
-                'after upload.')
+                'after upload.' + readable_note(saved))
             app.open_sample(sample['experiment_id'])
         def failed(error):
             self._saving = False
@@ -1684,7 +1691,7 @@ class ProcedureForm(Page):
             self._saving = False
             record = saved['record']
             app.procedure_cache.pop(record['id'], None)
-            app.info(f"Saved {record['id']} version {record['version']}.")
+            app.info(f"Saved {record['id']} version {record['version']}." + readable_note(saved))
             app.refresh(then=lambda: app.show('procedures'))
         app.run('Saving procedure…', work, done, failed)
 
@@ -1938,7 +1945,10 @@ class SettingsPage(Page):
         ttk.Label(coordinator.body, text='Only needed once for the whole consortium. Creates the shared "CATALYST" project '
             'with its Samples and Procedures studies. Afterwards, share the project with each lab account in SciSure '
             '(collaborators with edit rights).', style='Hint.TLabel', wraplength=820, justify='left').pack(anchor='w', pady=(4, 8))
-        ttk.Button(coordinator.body, text='Set up CATALYST workspace', command=self.setup_workspace).pack(anchor='w')
+        tools = ttk.Frame(coordinator.body)
+        tools.pack(anchor='w')
+        ttk.Button(tools, text='Set up CATALYST workspace', command=self.setup_workspace).pack(side='left')
+        ttk.Button(tools, text='Write readable copies for older records', command=self.write_readable).pack(side='left', padx=6)
         about = Card(scroll.body, padding=18)
         about.pack(fill='x')
         ttk.Label(about.body, text=f'CATALYST desktop {__version__}', style='Sub.TLabel').pack(anchor='w')
@@ -2041,6 +2051,14 @@ class SettingsPage(Page):
             text += ('The shared CATALYST workspace is available.' if app.store.workspace_ready() else
                 'This account cannot see the shared CATALYST workspace yet.')
         self.connection_status.configure(text=text)
+
+    def write_readable(self):
+        app = self.app
+        if not app.connected():
+            return
+        app.run('Adding readable copies in SciSure…', lambda progress: app.store.write_missing_readable(progress),
+            lambda r: app.info(f"Checked {r['checked']} samples and procedures: added {r['written']} readable cop"
+                f"{'y' if r['written'] == 1 else 'ies'}" + (f", {r['failed']} could not be written." if r['failed'] else '.')))
 
     def setup_workspace(self):
         app = self.app

@@ -185,8 +185,8 @@ class StoreTests(unittest.TestCase):
         self.store._save_section(sample['experiment_id'], record, files, lambda _: None)
         names = [f['realName'] for f in self.fake.files.values() if f['experimentID'] == sample['experiment_id']]
         self.assertEqual(names.count('a.xy'), 1)  # the original is found and reused, never sent twice
-        sections = [s for s in self.fake.sections.values() if s['experimentID'] == sample['experiment_id']]
-        self.assertEqual(len(sections), 2)
+        sections = [s['sectionType'] for s in self.fake.sections.values() if s['experimentID'] == sample['experiment_id']]
+        self.assertEqual((sections.count('FILE'), sections.count('PARAGRAPH')), (2, 2))  # nothing duplicated on retry
 
     def test_missing_workspace_and_permission_messages(self):
         other = Store(SciSureClient('synthetic-token', transport=FakeSciSure()))
@@ -198,6 +198,43 @@ class StoreTests(unittest.TestCase):
         with self.assertRaisesRegex(StoreError, 'share'):
             self.store.add_shipment(sample, lambda sid: records.shipment_record(shipment_id=sid, sample_id=sample['id'],
                 profile=SLAC, to_lab='UR', ship_date='2026-10-01')[0])
+
+    def test_every_record_gets_a_readable_copy_in_scisure(self):
+        saved = self.new_sample()
+        sample = saved['sample']
+        self.assertIsNone(saved['readable_warning'])
+        rows = sorted((s for s in self.fake.sections.values() if s['experimentID'] == sample['experiment_id']),
+            key=lambda s: s['order'])
+        self.assertEqual([r['sectionType'] for r in rows], ['PARAGRAPH', 'FILE'])  # readable copy sits above the files
+        text = rows[0]['contents']
+        self.assertIn('Sample UR-MDP-260925-01', rows[0]['sectionHeader'])
+        for expected in ('Composition', '10 wt% Mo + 1 wt% K on γ-Al2O3', 'Calcination temperature (°C)', '450',
+                'Preparation method', 'catalyst-record.json'):
+            self.assertIn(expected, text)
+        self.assertEqual(len(self.store.sections(sample['experiment_id'])), 1)  # the app still reads only its records
+        # Procedures get one too, with the full recipe.
+        procedure_rows = [s for s in self.fake.sections.values() if s.get('sectionType') == 'PARAGRAPH'
+            and s['sectionHeader'].startswith('Procedure PRC-UR-001 version 1')]
+        self.assertIn('Impregnate, dry at 110 °C, calcine.', procedure_rows[0]['contents'])
+        # A missing copy (older record, or a failed write) is added by the coordinator tool, once.
+        for row in rows[:1]:
+            self.fake.sections[row['expJournalID']]['deleted'] = True
+        self.assertEqual(self.store.write_missing_readable()['written'], 1)
+        self.assertEqual(self.store.write_missing_readable()['written'], 0)
+
+    def test_readable_copy_failure_does_not_lose_the_record(self):
+        sample = self.new_sample()['sample']
+        original = self.fake.__call__
+        def no_text(url, method, headers, body):
+            if method == 'PUT' and url.endswith('/content'):
+                return 405, b''
+            return original(url, method, headers, body)
+        self.store.client._transport = no_text
+        record = records.data_record(data_id=sample['id'] + '-XRD-01', sample_id=sample['id'], technique='XRD',
+            profile=SLAC, measured_date='2026-09-30', files=['a'])[0]
+        saved = self.store._save_section(sample['experiment_id'], record, [FileItem(name='a.xy', content=b'1 2')], lambda _: None)
+        self.assertTrue(saved['readable_warning'])
+        self.assertEqual([d['id'] for d in self.store.open_sample(sample)['data']], [sample['id'] + '-XRD-01'])
 
     def test_interrupted_saves_finish_the_same_id_on_retry(self):
         procedure = self.procedure()

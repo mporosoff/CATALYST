@@ -63,10 +63,21 @@ class FakeSciSure:
                 if self.deny_other_writes and self.experiments[eid]['userID'] != self.user_id:
                     return 403, b''
                 sid = self._id(); payload = json.loads(body)
+                siblings = [s for s in self.sections.values() if s['experimentID'] == eid]
+                order = payload.pop('order', len(siblings))
+                for s in siblings:
+                    if s['order'] >= order:
+                        s['order'] += 1
                 self.sections[sid] = dict(expJournalID=sid, experimentID=eid, deleted=False, firstName=self.user[0],
-                    lastName=self.user[1], **payload)
+                    lastName=self.user[1], order=order, **payload)
                 return ok(sid)
-            return ok(self._page([s for s in self.sections.values() if s['experimentID'] == eid], query))
+            rows = sorted((s for s in self.sections.values() if s['experimentID'] == eid), key=lambda s: s['order'])
+            return ok(self._page([{k: v for k, v in s.items() if k != 'contents'} for s in rows], query))
+        m = re.fullmatch(r'/api/v1/experiments/sections/(\d+)/content', path)
+        if m and method == 'PUT':
+            payload = json.loads(body)
+            self.sections[int(m[1])]['contents'] = payload['contents']
+            return 204, b''
         m = re.fullmatch(r'/api/v1/experiments/sections/(\d+)/files(?:/(\d+))?', path)
         if m:
             sid = int(m[1])

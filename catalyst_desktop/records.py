@@ -419,6 +419,39 @@ def recipe_lines(recipe):
     return lines
 
 
+def readable_header(record):
+    """Heading of the human-readable text section shown in SciSure next to the record."""
+    kind, by = record['kind'], record['created_by']
+    if kind == 'sample':
+        return f"Sample {record['id']} — details (readable copy)"
+    if kind == 'data':
+        return f"{record.get('technique_label', record['technique'])} · {record['date']} · {by['lab']} ({by['initials']}) — {record['id']}"
+    if kind == 'shipment':
+        return f"Shipment {record['from_lab']} → {record['to_lab']} · {record['date']} — {record['id']}"
+    if kind == 'procedure':
+        return f"Procedure {record['id']} version {record['version']} — {record['name']}"
+    raise RecordError('Unknown record type.')
+
+
+def readable_html(record):
+    """A plain table of everything in the record, for people browsing SciSure."""
+    import html
+    esc = lambda value: html.escape(str(value)).replace('\n', '<br>')
+    kind = record['kind']
+    rows = list(summary_lines(record))
+    if kind == 'sample':
+        rows += [(label, value) for label, value in recipe_lines(record.get('recipe'))]
+    if kind in ('sample', 'data', 'procedure') and record.get('files'):
+        rows.append(('Files in this record', '\n'.join(f"{f['name']} ({f['size_bytes']:,} bytes)" for f in record['files'])))
+    body = ''.join(f'<tr><td style="padding:3px 12px 3px 0;vertical-align:top;color:#555"><b>{esc(label)}</b></td>'
+        f'<td style="padding:3px 0;vertical-align:top">{esc(value)}</td></tr>' for label, value in rows if value not in (None, ''))
+    return (f'<p><b>{esc(readable_header(record))}</b></p>'
+        f'<table style="border-collapse:collapse">{body}</table>'
+        f'<p style="color:#777;font-size:90%">Written by the CATALYST app on {esc(record.get("created_at", "")[:10])}. '
+        'This is a readable copy: edits made here are not read back into CATALYST. The machine-readable record is '
+        f'{RECORD_FILE} in the file section below.</p>')
+
+
 def summary_lines(record):
     """Human-readable lines for previews and the sample page."""
     kind = record['kind']

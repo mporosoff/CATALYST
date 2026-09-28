@@ -86,6 +86,10 @@ Open the sample → **Log shipment** (destination, date, amount, tracking). The 
 
 For example, reduced, spent, pelletized or scaled up: open it and click **New sample made from this**. The new sample gets its own ID and is linked to the original.
 
+## Looking at records in SciSure
+
+You don't need SciSure itself, but if you do open it, each record appears as a readable table (recipe, conditions, who, when) above its files. Make changes in CATALYST, not in SciSure: edits to that table are not read back.
+
 ## Drafts
 
 Half-finished forms are saved automatically and come back when you reopen CATALYST. Only what you typed and the locations of the files you picked are saved, not the files themselves.

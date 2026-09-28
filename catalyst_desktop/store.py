@@ -301,7 +301,62 @@ class Store:
         record = dict(record, files=manifest)
         progress('Saving the record…')
         self._upload(section_id, records.RECORD_FILE, encode(record))
-        return dict(section_id=section_id, record=record)
+        result = dict(section_id=section_id, record=record, readable_warning=None)
+        progress('Writing the readable copy in SciSure…')
+        try:
+            self.write_readable(experiment_id, record, section_id)
+        except (SciSureError, StoreError, KeyError, TypeError, ValueError) as error:
+            # The record itself is saved and complete; the readable copy is a convenience that can be rewritten.
+            result['readable_warning'] = str(error)
+        return result
+
+    def write_readable(self, experiment_id, record, before_section=None):
+        """Create (or refresh) the human-readable text section that sits just above the record's file section."""
+        header = records.readable_header(record)
+        path = f'/api/v1/experiments/{experiment_id}/sections'
+        rows = self.client.list(path)
+        existing = [r for r in rows if r.get('sectionHeader') == header and r.get('deleted') is not True
+            and r.get('sectionType') == 'PARAGRAPH']
+        if existing:
+            text_id = remote_id(min(existing, key=lambda r: remote_id(r['expJournalID']))['expJournalID'])
+        else:
+            body = dict(sectionType='PARAGRAPH', sectionHeader=header)
+            anchor = next((r for r in rows if before_section and r.get('expJournalID') == before_section), None)
+            if anchor is not None and isinstance(anchor.get('order'), int):
+                body['order'] = anchor['order']
+            try:
+                self.client.request(path, 'POST', body)
+            except SciSureError as error:
+                if error.status == 403:
+                    raise StoreError(PERMISSION_HINT) from None
+                raise
+            found = [r for r in self.client.list(path) if r.get('sectionHeader') == header and r.get('deleted') is not True]
+            if not found:
+                raise StoreError('The readable text section could not be confirmed in SciSure.')
+            text_id = remote_id(min(found, key=lambda r: remote_id(r['expJournalID']))['expJournalID'])
+        self.client.request(f'/api/v1/experiments/sections/{text_id}/content', 'PUT',
+            dict(contents=records.readable_html(record)))
+        return text_id
+
+    def write_missing_readable(self, progress=lambda _: None):
+        """Coordinator tool: add readable copies to records saved before this feature (or whose copy failed)."""
+        self._need_workspace()
+        experiments = [s['experiment_id'] for s in self.list_samples()] + [p['experiment_id'] for p in self.list_procedures()]
+        written = failed = 0
+        for index, experiment_id in enumerate(experiments, 1):
+            progress(f'Checking record {index} of {len(experiments)}…')
+            rows = self.client.list(f'/api/v1/experiments/{experiment_id}/sections')
+            headers = {r.get('sectionHeader') for r in rows if r.get('sectionType') == 'PARAGRAPH' and r.get('deleted') is not True}
+            for section in self.sections(experiment_id):
+                record, _files = self.load_record(section)
+                if not record or records.readable_header(record) in headers:
+                    continue
+                try:
+                    self.write_readable(experiment_id, record, section['section_id'])
+                    written += 1
+                except (SciSureError, StoreError):
+                    failed += 1
+        return dict(written=written, failed=failed, checked=len(experiments))
 
     def sample_ids_for(self, lab, initials, when):
         prefix = ids.sample_prefix(lab, initials, when)
@@ -342,7 +397,8 @@ class Store:
         self.last_reserved = None
         info = records.parse_sample_experiment_name(name)
         info.update(experiment_id=experiment_id, created='')
-        return dict(sample=info, record=saved['record'], duplicate_warning=bool(clashes))
+        return dict(sample=info, record=saved['record'], duplicate_warning=bool(clashes),
+            readable_warning=saved['readable_warning'])
 
     def add_data(self, sample, build, files, progress=lambda _: None, reserved_id=None):
         """``build(data_id)`` returns the data record for the ID assigned now.

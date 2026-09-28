@@ -44,6 +44,8 @@ Project  CATALYST
       FILE section  "CATALYST procedure | PRC-UR-001 v1 | …"  one section per version
 ```
 
+Every record also gets a **readable text section** just above its file section. It shows everything in the record as a labelled table (recipe, deviations from the procedure, conditions, files), so people browsing SciSure can read it without opening any file. It's a copy: edits made there are not read back into CATALYST. To add readable copies to records saved before version 1.2, use **Settings → Coordinator tools → Write readable copies for older records**.
+
 Rules the app follows:
 
 - Original files are uploaded first and `catalyst-record.json` last. A section without a record is an unfinished upload, and the app shows it as one.

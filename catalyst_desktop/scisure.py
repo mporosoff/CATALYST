@@ -100,7 +100,9 @@ class SciSureClient:
         sample_link = (method == 'PUT' and re.fullmatch(r'/api/v1/experiments/sections/[1-9]\d*/samples', path)
             and isinstance(data, list) and 1 <= len(data) <= 1000
             and all(type(value) is int and 0 < value <= 9007199254740991 for value in data) and len(set(data)) == len(data))
-        if (method not in ('GET', 'POST') and not sample_link) or (method == 'GET' and data is not None):
+        text_content = (method == 'PUT' and re.fullmatch(r'/api/v1/experiments/sections/[1-9]\d*/content', path)
+            and isinstance(data, dict) and isinstance(data.get('contents'), str))
+        if (method not in ('GET', 'POST') and not sample_link and not text_content) or (method == 'GET' and data is not None):
             raise SciSureError('Unsupported SciSure operation.')
         write = method != 'GET'
         headers = {'Authorization': self._token, 'X-Requested-With': 'Swagger',
