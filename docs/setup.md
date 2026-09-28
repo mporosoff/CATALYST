@@ -2,10 +2,10 @@
 
 ## Confirmed choices
 
-- Private source repository: https://github.com/mporosoff/CATALYST
+- Source repository (public; no credentials or research data): https://github.com/mporosoff/CATALYST
 - Initial modalities: reactor data, catalyst synthesis, and spectroscopy.
 - Initial destination: approved records and source files in revision-specific experiment file sections; choose or create a verified sandbox test experiment.
-- Deployment: owner-private Sites application with a Cloudflare Worker backend, D1 metadata, and R2 file storage. See [the web application guide](web-application.md).
+- Deployment: the CATALYST desktop app (Windows and Mac), published through GitHub Releases. The earlier Cloudflare web prototype is retired.
 - Initial environment: `https://sandbox.elabjournal.com`, confirmed by the user after login. A credential-free GET to `/api/v1/addons/licenses` returned 401 on September 11, 2026. This establishes a reachable protected endpoint, not permission to a group or access to its records.
 - Initial examples: raw and reprocessed packed-bed reactor GC workbooks from University of Rochester. The user confirmed they represent the same run and that original row labels were wrong. Originals and extracted research values are excluded from GitHub.
 

@@ -38,8 +38,8 @@ if sys.platform == 'darwin':
     subprocess.run(['ditto', str(app), str(staging / 'CATALYST.app')], check=True)
     if not (staging / 'Applications').exists():
         (staging / 'Applications').symlink_to('/Applications')
-    shutil.copy2(root / 'docs' / 'desktop-quickstart.md', staging / 'READ-ME.md')
-    shutil.copy2(root / 'docs' / 'scisure-configuration.md', staging / 'SciSure-configuration.md')
+    shutil.copy2(root / 'docs' / 'user-guide.md', staging / 'READ-ME.md')
+    shutil.copy2(root / 'docs' / 'install.md', staging / 'INSTALL.md')
     output = root / 'desktop-dist' / ('CATALYST-Mac-AppleSilicon.dmg' if platform.machine() == 'arm64' else 'CATALYST-Mac-Intel.dmg')
     subprocess.run(['hdiutil', 'create', '-volname', 'CATALYST ' + __version__, '-srcfolder', str(staging),
         '-ov', '-format', 'UDZO', str(output)], check=True)
@@ -54,8 +54,7 @@ elif sys.platform == 'win32':
     output = executable
 else:
     app = root / 'desktop-dist' / 'CATALYST'
-    shutil.copy2(root / 'docs' / 'desktop-quickstart.md', app / 'READ-ME.md')
-    shutil.copy2(root / 'docs' / 'consortium-workflow.md', app / 'consortium-workflow.md')
-    shutil.copy2(root / 'docs' / 'scisure-integration-review.md', app / 'scisure-integration-review.md')
+    shutil.copy2(root / 'docs' / 'user-guide.md', app / 'READ-ME.md')
+    shutil.copy2(root / 'docs' / 'install.md', app / 'INSTALL.md')
     output = shutil.make_archive(str(root / 'desktop-dist' / f'CATALYST-{__version__}-{platform.system()}-{platform.machine()}'), 'zip', root_dir=app.parent, base_dir=app.name)
 print(f'Built {output}')
