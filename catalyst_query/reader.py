@@ -7,7 +7,7 @@ import os
 import threading
 import time
 
-from catalyst_desktop import ids
+from catalyst_desktop import records, ids
 from catalyst_desktop.dataset import data_rows, sample_row
 from catalyst_desktop.scisure import SciSureClient, SANDBOX
 from catalyst_desktop.store import Store
@@ -57,13 +57,14 @@ class CatalystReader:
 
     # ------------------------------------------------------------------ samples
     def _sample_index(self):
-        return self._cached('samples', self.store.list_samples)
+        return self._cached('samples', lambda: self.store.list_samples(include_retired=True))
 
     def samples(self, search=None, lab=None, researcher=None, procedure=None, since=None):
         words = str(search or '').casefold().split()
         lab_key = ids.lab_key(lab) if lab else None
         result = []
         for s in self._sample_index():
+            if s.get('status') == 'registered_in_error': continue
             text = f"{s['id']} {s['composition']} {s['procedure']}".casefold()
             if words and not all(w in text for w in words): continue
             if lab_key and s['lab'] != lab_key: continue
@@ -83,8 +84,14 @@ class CatalystReader:
 
     def sample(self, sample_id):
         entry = self._open(sample_id)
-        return dict(sample=entry['record'], data=[_public(d) for d in entry['data']],
+        result = dict(sample=entry['record'], data=[_public(d) for d in entry['data']],
             shipments=[s['record'] for s in entry['shipments']], unfinished_uploads=len(entry['incomplete']))
+        if entry.get('withdrawn'):
+            result['withdrawn_data'] = [dict(data_id=d['id'], reason=d['record'].get('status_note', '')) for d in entry['withdrawn']]
+        if records.status_of(entry['record']) == 'registered_in_error':
+            result['warning'] = ('This sample was registered in error and must not be used'
+                + (f"; use {entry['record']['replaced_by']} instead." if entry['record'].get('replaced_by') else '.'))
+        return result
 
     # ------------------------------------------------------------------ procedures
     def procedures(self):
@@ -101,7 +108,11 @@ class CatalystReader:
     # ------------------------------------------------------------------ data
     def entries(self, sample_ids=None, technique=None):
         index = self._sample_index()
-        chosen = [s for s in index if sample_ids is None or s['id'] in set(sample_ids)]
+        if sample_ids is None:
+            chosen = [s for s in index if s.get('status') != 'registered_in_error']
+        else:
+            wanted = set(sample_ids)
+            chosen = [s for s in index if s['id'] in wanted]
         code = ids.technique_code(technique) if technique else None
         return [dict(e, data=[d for d in e['data'] if not code or d['technique'] == code])
             for e in (self._open(s['id']) for s in chosen)]
@@ -173,7 +184,7 @@ class CatalystReader:
         return '\n'.join(lines[:max_rows]) + more
 
     def summary(self):
-        index = self._sample_index()
+        index = [s for s in self._sample_index() if s.get('status') != 'registered_in_error']
         by_lab, by_procedure = {}, {}
         for s in index:
             by_lab[s['lab_name']] = by_lab.get(s['lab_name'], 0) + 1

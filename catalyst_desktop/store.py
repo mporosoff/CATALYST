@@ -31,6 +31,7 @@ from catalyst_ingest.jsonio import strict_loads
 PROJECT = 'CATALYST'
 SAMPLES_STUDY = 'CATALYST Samples'
 PROCEDURES_STUDY = 'CATALYST Procedures'
+CHANGES_LOG = 'CATALYST corrections log'   # experiment in the Samples study; one section per sample correction
 LIST_LIMIT = 100_000
 MAX_FILES = 50
 PERMISSION_HINT = ('Your lab account cannot add to this record. Ask the CATALYST coordinator to share the '
@@ -66,8 +67,9 @@ def check_files(files, required=True):
         raise StoreError(f'Add at most {MAX_FILES} files to one record.')
     if len({n.casefold() for n in names}) != len(names):
         raise StoreError('Two files have the same name. Rename one of them.')
-    if any(n.casefold() == records.RECORD_FILE for n in names):
-        raise StoreError(f'"{records.RECORD_FILE}" is reserved by CATALYST. Rename that file.')
+    reserved = [n for n in names if records.record_file_revision(n.casefold()) is not None]
+    if reserved:
+        raise StoreError(f'"{reserved[0]}" is a name reserved by CATALYST. Rename that file.')
     for f in files:
         if f.path is not None:
             if not f.path.is_file():
@@ -79,6 +81,28 @@ def check_files(files, required=True):
                 raise StoreError(f'{f.name} is larger than 20 MB. Split or compress it before uploading.')
 
 
+def change_header(record):
+    """Corrections-log entry: lets the sample list show a correction without opening every sample."""
+    name = records.parse_sample_experiment_name(records.sample_experiment_name(record))
+    return records.SEP.join(['CATALYST change', record['id'], records.status_of(record), f"r{records.revision_of(record)}",
+        name['composition'] or '—', name['origin'] or '—'])
+
+
+def parse_change(header):
+    parts = [p.strip() for p in str(header or '').split(records.SEP)]
+    if len(parts) < 6 or parts[0] != 'CATALYST change' or not parts[3].startswith('r') or not parts[3][1:].isdigit():
+        return None
+    return dict(id=parts[1], status=parts[2], revision=int(parts[3][1:]),
+        composition='' if parts[4] == '—' else parts[4], origin='' if parts[5] == '—' else parts[5])
+
+
+def same_change(saved, attempt):
+    """True when ``saved`` is this very correction, saved by an earlier attempt that lost its connection."""
+    keys = ('revision_note', 'status')
+    return all(saved.get(k) == attempt.get(k) for k in keys) and \
+        (saved.get('revised_by') or {}).get('name') == (attempt.get('revised_by') or {}).get('name')
+
+
 class Store:
     def __init__(self, client, app_version='', project=PROJECT):
         self.client, self.app_version, self.project_name = client, app_version, project
@@ -87,6 +111,7 @@ class Store:
         self.account = {}
         self._ops = {}
         self.last_reserved = None
+        self._log_id = None
 
     # ------------------------------------------------------------------ connection
     def connect(self):
@@ -150,15 +175,36 @@ class Store:
         rows = self.client.list('/api/v1/experiments?' + urlencode({'studyID': study_id}), limit=LIST_LIMIT)
         return [r for r in rows if r.get('studyID') == study_id and r.get('deleted') is not True and r.get('template') is not True]
 
-    def list_samples(self):
+    def list_samples(self, include_retired=False):
         self._need_workspace()
-        result = []
+        result, log = [], None
         for row in self._experiments(self.workspace['samples_study']):
+            if row.get('name') == CHANGES_LOG:
+                log = log if log is not None and remote_id(log['experimentID']) < remote_id(row['experimentID']) else row
+                continue
             info = records.parse_sample_experiment_name(row.get('name'))
             if info:
                 info.update(experiment_id=remote_id(row['experimentID']), created=str(row.get('created') or ''),
-                    experiment_name=row.get('name'))
+                    experiment_name=row.get('name'), status='active', revision=1)
                 result.append(info)
+        if log is not None:
+            self._log_id = remote_id(log['experimentID'])
+            latest = {}
+            for section in self.client.list(f"/api/v1/experiments/{self._log_id}/sections"):
+                change = parse_change(section.get('sectionHeader'))
+                if change and section.get('deleted') is not True and change['revision'] >= latest.get(change['id'], {}).get('revision', 0):
+                    latest[change['id']] = change
+            for info in result:
+                change = latest.get(info['id'])
+                if change:
+                    info.update(status=change['status'], revision=change['revision'])
+                    if change.get('composition'): info['composition'] = change['composition']
+                    if change.get('origin') is not None:
+                        info['origin'] = change['origin']
+                        info['procedure'] = '' if change['origin'].startswith('Commercial') else change['origin']
+                        info['source'] = 'commercial' if change['origin'].startswith('Commercial') else 'synthesized'
+        if not include_retired:
+            result = [s for s in result if s['status'] != 'registered_in_error']
         return sorted(result, key=lambda s: (s['date'], s['id']), reverse=True)
 
     def list_procedures(self):
@@ -196,21 +242,55 @@ class Store:
             raise StoreError(f'{file_row.get("realName")} failed its integrity check after download.')
         return content
 
+    def _record_rows(self, rows):
+        """Record files by revision, oldest first. If two people saved the same revision at once, the first upload wins."""
+        first = {}
+        for row in rows:
+            rev = records.record_file_revision(row.get('realName'))
+            if rev is not None and (rev not in first or
+                    remote_id(row['experimentFileID']) < remote_id(first[rev]['experimentFileID'])):
+                first[rev] = row
+        return sorted(first.items())
+
+    def _read_record(self, section_id, row, section=None, revision=None):
+        try:
+            record = strict_loads(self.download(section_id, row))
+        except (ValueError, StoreError):
+            return None
+        if not isinstance(record, dict) or record.get('format') != records.RECORD_FORMAT:
+            return None
+        if revision is not None and records.revision_of(record) != revision:
+            return None  # e.g. a researcher's own file that happens to use a reserved name (allowed before 1.3)
+        if section and (record.get('id') != section.get('id') or record.get('kind') != section.get('kind')):
+            return None
+        return record
+
     def load_record(self, section):
-        """Return the section's record (or None if the upload never finished) and its file list."""
+        """The section's latest readable record (None if the upload never finished) and its current files.
+
+        Only files listed in the record are current. Files a correction marked superseded are returned separately
+        in ``section['superseded']``; leftovers from an interrupted save are ignored."""
         rows = self.files(section['section_id'])
-        record_rows = [f for f in rows if f.get('realName') == records.RECORD_FILE]
         record = None
-        if record_rows:
-            newest = max(record_rows, key=lambda f: remote_id(f['experimentFileID']))
-            try:
-                record = strict_loads(self.download(section['section_id'], newest))
-            except (ValueError, StoreError):
-                record = None
-            if not isinstance(record, dict) or record.get('format') != records.RECORD_FORMAT:
-                record = None
-        originals = [f for f in rows if f.get('realName') != records.RECORD_FILE]
-        return record, originals
+        for revision, row in reversed(self._record_rows(rows)):
+            record = self._read_record(section['section_id'], row, section, revision)
+            if record is not None:
+                break
+        if record is None:
+            return None, [f for f in rows if records.record_file_revision(f.get('realName')) is None]
+        def pick(names):
+            chosen = {}
+            for f in sorted(rows, key=lambda f: remote_id(f['experimentFileID'])):
+                if f.get('realName') in names:
+                    chosen.setdefault(f['realName'], f)
+            return [chosen[n] for n in names if n in chosen]
+        section['superseded'] = pick(list(record.get('superseded_files') or []))
+        return record, pick([f['name'] for f in record.get('files', [])])
+
+    def record_history(self, section):
+        """Every saved revision of a record, oldest first."""
+        return [r for r in (self._read_record(section['section_id'], row, section, rev)
+            for rev, row in self._record_rows(self.files(section['section_id']))) if r]
 
     def open_sample(self, sample, progress=lambda _: None):
         """Everything saved for one sample: its record, data records and shipping log."""
@@ -221,16 +301,19 @@ class Store:
             return dict(section, record=record, files=files, complete=record is not None)
         with ThreadPoolExecutor(max_workers=4) as pool:
             loaded = list(pool.map(load, sections))
-        result = dict(sample=sample, record=None, sample_files=[], data=[], shipments=[], incomplete=[])
+        result = dict(sample=sample, record=None, sample_files=[], data=[], withdrawn=[], shipments=[], incomplete=[])
         for item in loaded:
             if not item['complete']:
                 result['incomplete'].append(item)
             elif item['kind'] == 'sample' and item['id'] == sample['id']:
                 result['record'], result['sample_files'], result['sample_section'] = item['record'], item['files'], item['section_id']
+                result['sample_item'] = item
             elif item['kind'] == 'data':
-                result['data'].append(item)
+                (result['withdrawn'] if records.status_of(item['record']) == 'withdrawn' else result['data']).append(item)
             elif item['kind'] == 'shipment':
                 result['shipments'].append(item)
+        for item in result['data'] + result['withdrawn']:
+            item['date'] = item['record'].get('date', item['date'])  # a correction may have changed the date
         result['data'].sort(key=lambda d: (d['date'], d['id']))
         result['shipments'].sort(key=lambda d: (d['date'], d['id']))
         return result
@@ -341,7 +424,8 @@ class Store:
     def write_missing_readable(self, progress=lambda _: None):
         """Coordinator tool: add readable copies to records saved before this feature (or whose copy failed)."""
         self._need_workspace()
-        experiments = [s['experiment_id'] for s in self.list_samples()] + [p['experiment_id'] for p in self.list_procedures()]
+        logged = self.list_samples(include_retired=True)   # as the sample list currently shows them
+        experiments = [s['experiment_id'] for s in logged] + [p['experiment_id'] for p in self.list_procedures()]
         written = failed = 0
         for index, experiment_id in enumerate(experiments, 1):
             progress(f'Checking record {index} of {len(experiments)}…')
@@ -349,6 +433,13 @@ class Store:
             headers = {r.get('sectionHeader') for r in rows if r.get('sectionType') == 'PARAGRAPH' and r.get('deleted') is not True}
             for section in self.sections(experiment_id):
                 record, _files = self.load_record(section)
+                if record and record['kind'] == 'sample' and records.revision_of(record) > 1:
+                    listed = next((x for x in logged if x['id'] == record['id']), None)
+                    if not listed or listed['revision'] != records.revision_of(record) or listed['status'] != records.status_of(record):
+                        try:
+                            self._log_change(record); written += 1
+                        except (SciSureError, StoreError):
+                            failed += 1
                 if not record or records.readable_header(record) in headers:
                     continue
                 try:
@@ -358,9 +449,116 @@ class Store:
                     failed += 1
         return dict(written=written, failed=failed, checked=len(experiments))
 
-    def sample_ids_for(self, lab, initials, when):
-        prefix = ids.sample_prefix(lab, initials, when)
-        return [s['id'] for s in self.list_samples() if s['id'].startswith(prefix)]
+    # ------------------------------------------------------------------ corrections
+    def revise_record(self, experiment_id, section, updated, new_files=(), supersede=(), expected_revision=None,
+            progress=lambda _: None):
+        """Save a corrected record as the next revision in the same section.
+
+        ``updated`` is the full new record from records.revise(). New files are added (renamed if a file of that
+        name exists); files named in ``supersede`` stay in SciSure but are no longer current."""
+        check_files(list(new_files), required=False)
+        progress('Checking that nobody else changed this record…')
+        current, _files = self.load_record(section)
+        if current is None:
+            raise StoreError('This record could not be read. Refresh and try again.')
+        section_id = section['section_id']
+        if expected_revision is not None and records.revision_of(current) != expected_revision:
+            if records.revision_of(current) == expected_revision + 1 and same_change(current, updated):
+                return self._after_revision(experiment_id, section_id, current)  # an earlier attempt already saved it
+            by = current.get('revised_by') or {}
+            raise StoreError(f"{by.get('name', 'Someone')} corrected this record while you were editing it. Reopen it, "
+                'check their change and make your correction again.')
+        revision = records.revision_of(current) + 1
+        if records.revision_of(updated) != revision:
+            raise StoreError('This correction is out of date. Reopen the record and try again.')
+        rows = self.files(section_id)
+        in_use = {f['name'] for f in current.get('files', [])} | set(current.get('superseded_files') or [])
+        leftovers = {f.get('realName') for f in rows} - in_use   # from an interrupted attempt: safe to reuse
+        chosen_names = set()
+        active = [f for f in current.get('files', []) if f['name'] not in set(supersede)]
+        if len(active) + len(new_files) > MAX_FILES:
+            raise StoreError(f'A record can hold at most {MAX_FILES} current files.')
+        for index, item in enumerate(new_files, 1):
+            content = item.read()
+            name = self._free_name(section_id, rows, item.name, content, revision, in_use | chosen_names, leftovers)
+            chosen_names.add(name)
+            progress(f'Uploading and checking {name} ({index} of {len(new_files)})…')
+            self._upload(section_id, name, content)
+            active.append(dict(name=name, sha256=digest(content), size_bytes=len(content)))
+        record = dict(updated, files=active, superseded_files=sorted(set(current.get('superseded_files') or []) | set(supersede)))
+        if record.get('history'):
+            record['history'] = record['history'][:-1] + [dict(record['history'][-1], changes=records.changed_fields(current, record))]
+        if record['kind'] == 'data' and not active and records.status_of(record) == 'active':
+            raise StoreError('A data record needs at least one current file. Add the corrected file, or withdraw the record.')
+        progress('Saving the corrected record…')
+        content = encode(record)
+        file_name = records.record_file_name(revision)
+        self._upload(section_id, file_name, content)
+        # Two people saving the same revision at the same moment: the first upload wins, the other is told.
+        winner = dict(self._record_rows(self.files(section_id))).get(revision)
+        if winner is None or digest(self.download(section_id, winner)) != digest(content):
+            raise StoreError('Someone else saved a correction to this record at the same moment, so yours was not '
+                'applied. Reopen the record, check their change and make your correction again.')
+        return self._after_revision(experiment_id, section_id, record)
+
+    def _after_revision(self, experiment_id, section_id, record):
+        """Sample list entry and readable copy. The record itself is already saved, so problems here are warnings."""
+        result = dict(section_id=section_id, record=record, readable_warning=None)
+        problems = []
+        if record['kind'] == 'sample':
+            try:
+                self._log_change(record)
+            except (SciSureError, StoreError) as error:
+                problems.append(f'the sample list entry could not be updated: {error}')
+        try:
+            self.write_readable(experiment_id, record, section_id)
+        except (SciSureError, StoreError, KeyError, TypeError, ValueError) as error:
+            problems.append(str(error))
+        result['readable_warning'] = '; '.join(problems) or None
+        return result
+
+    def _free_name(self, section_id, rows, name, content, revision, in_use, leftovers):
+        stem, dot, ext = name.rpartition('.')
+        stem, ext = (stem, '.' + ext) if dot and stem else (name, '')
+        candidates = [name] + [f'{stem} (r{revision}){ext}'] + [f'{stem} (r{revision}-{n}){ext}' for n in range(2, 1000)]
+        expected = digest(content)
+        for candidate in candidates:
+            if candidate in in_use:
+                continue
+            if candidate not in leftovers:
+                return candidate
+            # A file of this name was left by an interrupted attempt: reuse it only if it is this same file.
+            same = [f for f in rows if f.get('realName') == candidate]
+            if all(f.get('fileSize') == len(content) and digest(self.download(section_id, f)) == expected for f in same):
+                return candidate
+        raise StoreError(f'Could not find a free file name for {name}.')
+
+    def _log_change(self, record):
+        log_id = self._log_id or self._experiment(self.workspace['samples_study'], CHANGES_LOG)
+        self._log_id = log_id
+        self._section(log_id, change_header(record))
+
+    def set_status(self, experiment_id, item, profile, reason, status, replaced_by=None, progress=lambda _: None):
+        """Withdraw data, retire a sample (registered in error), or restore either one. Nothing is deleted."""
+        current = item['record']
+        updated = dict(current)
+        if current['kind'] == 'sample':
+            updated['replaced_by'] = replaced_by if status == 'registered_in_error' else None
+        record, problems = records.revise(current, updated, profile, reason, status=status, status_note=reason)
+        if problems:
+            raise StoreError(' '.join(problems))
+        return self.revise_record(experiment_id, item, record, expected_revision=records.revision_of(current),
+            progress=progress)
+
+    def retire_sample(self, opened, profile, reason, replaced_by=None, progress=lambda _: None):
+        return self.set_status(opened['sample']['experiment_id'], opened['sample_item'], profile, reason,
+            'registered_in_error', replaced_by, progress)
+
+    def withdraw_data(self, sample, item, profile, reason, progress=lambda _: None):
+        return self.set_status(sample['experiment_id'], item, profile, reason, 'withdrawn', progress=progress)
+
+    def restore(self, experiment_id, item, profile, reason, progress=lambda _: None):
+        return self.set_status(experiment_id, item, profile, reason, 'active', progress=progress)
 
     def create_sample(self, build, files, progress=lambda _: None, reserved_id=None):
         """``build(sample_id)`` returns the finished sample record for the ID assigned now.
@@ -375,7 +573,7 @@ class Store:
         probe = build(None)
         by, when = probe['created_by'], records.sample_date(probe)
         prefix = ids.sample_prefix(by['lab'], by['initials'], when)
-        listed = self.list_samples()
+        listed = self.list_samples(include_retired=True)
         sample_id = None
         for candidate in (reserved_id, self._ops.get('reserved/' + prefix)):
             if candidate and candidate.startswith(prefix):
@@ -391,7 +589,7 @@ class Store:
         name = records.sample_experiment_name(record)
         progress(f'Creating {sample_id} in SciSure…')
         experiment_id = self._experiment(self.workspace['samples_study'], name)
-        clashes = [s for s in self.list_samples() if s['id'] == sample_id and s['experiment_id'] != experiment_id]
+        clashes = [s for s in self.list_samples(include_retired=True) if s['id'] == sample_id and s['experiment_id'] != experiment_id]
         saved = self._save_section(experiment_id, record, files, progress)
         self._ops.pop('reserved/' + prefix, None)
         self.last_reserved = None

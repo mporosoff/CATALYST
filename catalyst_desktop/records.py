@@ -12,7 +12,9 @@ import re
 
 from . import ids
 
-RECORD_FILE = 'catalyst-record.json'
+RECORD_FILE = 'catalyst-record.json'          # revision 1; later revisions: catalyst-record-r2.json, -r3.json …
+RECORD_FILE_RE = re.compile(r'catalyst-record(?:-r(?P<rev>[1-9]\d{0,3}))?\.json')
+STATUSES = {'active': 'Active', 'withdrawn': 'Withdrawn', 'registered_in_error': 'Registered in error'}
 RECORD_FORMAT = 'catalyst-record/2'
 SEP = ' | '
 
@@ -276,6 +278,74 @@ def sample_record(*, sample_id, profile, synthesis_date, procedure, recipe, comp
     return record, problems
 
 
+def record_file_name(revision):
+    return RECORD_FILE if int(revision) <= 1 else f'catalyst-record-r{int(revision)}.json'
+
+
+def record_file_revision(name):
+    """Revision number encoded in a record file name, or None for any other file."""
+    match = RECORD_FILE_RE.fullmatch(str(name or ''))
+    if not match:
+        return None
+    return int(match['rev'] or 1)
+
+
+def revision_of(record):
+    return int((record or {}).get('revision') or 1)
+
+
+def status_of(record):
+    return (record or {}).get('status') or 'active'
+
+
+def can_change(record, profile, coordinator=False):
+    """Corrections: the lab that created the record, or the CATALYST coordinator."""
+    if coordinator:
+        return True
+    lab = ids.lab_code(profile['lab']) if (profile or {}).get('lab') else None
+    return bool(lab) and (record or {}).get('created_by', {}).get('lab') == lab
+
+
+def changed_fields(previous, current):
+    """Labels of the fields whose shown value differs between two versions of a record."""
+    before, after = dict(summary_lines(previous)), dict(summary_lines(current))
+    if previous.get('kind') == 'sample':
+        before.update(recipe_lines(previous.get('recipe')))
+        after.update(recipe_lines(current.get('recipe')))
+    skip = {'Differs from procedure', 'Status', 'Revision', 'Superseded files (kept)'}
+    labels = [label for label in list(before) + [l for l in after if l not in before]
+        if label not in skip and before.get(label) != after.get(label)]
+    files = lambda r: [(f['name'], f.get('sha256')) for f in r.get('files', [])]
+    if files(previous) != files(current):
+        labels.append('Files')
+    return labels
+
+
+def revise(previous, updated, profile, note, status=None, status_note=''):
+    """New revision of ``previous`` with the content of ``updated``. Identity and creator never change."""
+    problems = []
+    note = clean_text(note, 1000)
+    if not note:
+        problems.append('Say briefly why the record is being corrected (kept in its history).')
+    record = dict(updated)
+    for key in ('kind', 'id', 'created_at', 'created_by', 'format'):
+        if key in previous:
+            record[key] = previous[key]
+    revision = revision_of(previous) + 1
+    history = list(previous.get('history') or [dict(revision=1, at=previous.get('created_at'), by=previous.get('created_by'),
+        note='Original record', changes=[])])
+    record.update(revision=revision, revised_at=now(), revised_by=person(profile), revision_note=note,
+        status=status or status_of(previous), status_note=clean_text(status_note, 1000) if status else previous.get('status_note', ''),
+        superseded_files=list(previous.get('superseded_files') or []) + list(updated.get('superseded_files') or []))
+    for key in ('replaced_by',):
+        if key in previous and key not in updated:
+            record[key] = previous[key]
+    history.append(dict(revision=revision, at=record['revised_at'], by=record['revised_by'], note=note,
+        status=record['status'], changes=changed_fields(previous, record)))
+    record['history'] = history
+    return record, problems
+
+
 def sample_date(record):
     return record.get('synthesis_date') or record.get('received_date')
 
@@ -421,13 +491,13 @@ def recipe_lines(recipe):
 
 def readable_header(record):
     """Heading of the human-readable text section shown in SciSure next to the record."""
-    kind, by = record['kind'], record['created_by']
+    kind = record['kind']
     if kind == 'sample':
         return f"Sample {record['id']} — details (readable copy)"
     if kind == 'data':
-        return f"{record.get('technique_label', record['technique'])} · {record['date']} · {by['lab']} ({by['initials']}) — {record['id']}"
+        return f"{record.get('technique_label', record['technique'])} — {record['id']} (readable copy)"
     if kind == 'shipment':
-        return f"Shipment {record['from_lab']} → {record['to_lab']} · {record['date']} — {record['id']}"
+        return f"Shipment {record['from_lab']} → {record['to_lab']} — {record['id']} (readable copy)"
     if kind == 'procedure':
         return f"Procedure {record['id']} version {record['version']} — {record['name']}"
     raise RecordError('Unknown record type.')
@@ -443,17 +513,39 @@ def readable_html(record):
         rows += [(label, value) for label, value in recipe_lines(record.get('recipe'))]
     if kind in ('sample', 'data', 'procedure') and record.get('files'):
         rows.append(('Files in this record', '\n'.join(f"{f['name']} ({f['size_bytes']:,} bytes)" for f in record['files'])))
+    for step in (record.get('history') or [])[1:]:
+        by = step.get('by') or {}
+        rows.append((f"Change r{step.get('revision')}", f"{str(step.get('at', ''))[:10]} by {by.get('name', '')} "
+            f"({by.get('lab', '')}): {step.get('note', '')}" + (f" [changed: {', '.join(step.get('changes') or [])}]"
+            if step.get('changes') else '')))
     body = ''.join(f'<tr><td style="padding:3px 12px 3px 0;vertical-align:top;color:#555"><b>{esc(label)}</b></td>'
         f'<td style="padding:3px 0;vertical-align:top">{esc(value)}</td></tr>' for label, value in rows if value not in (None, ''))
     return (f'<p><b>{esc(readable_header(record))}</b></p>'
         f'<table style="border-collapse:collapse">{body}</table>'
-        f'<p style="color:#777;font-size:90%">Written by the CATALYST app on {esc(record.get("created_at", "")[:10])}. '
+        f'<p style="color:#777;font-size:90%">Written by the CATALYST app on '
+        f'{esc(str(record.get("revised_at") or record.get("created_at", ""))[:10])}. '
         'This is a readable copy: edits made here are not read back into CATALYST. The machine-readable record is '
-        f'{RECORD_FILE} in the file section below.</p>')
+        f'{record_file_name(revision_of(record))} in the file section below (earlier revisions are kept beside it).</p>')
 
 
 def summary_lines(record):
     """Human-readable lines for previews and the sample page."""
+    lines = _summary_lines(record)
+    if status_of(record) != 'active':
+        note = record.get('status_note') or ''
+        if record.get('replaced_by'):
+            note = (note + ' ' if note else '') + f"Replaced by {record['replaced_by']}."
+        lines.insert(0, ('Status', STATUSES.get(status_of(record), status_of(record)) + (f' — {note}' if note else '')))
+    if revision_of(record) > 1:
+        by = record.get('revised_by') or {}
+        lines.append(('Revision', f"{revision_of(record)} — corrected {str(record.get('revised_at', ''))[:10]} by "
+            f"{by.get('name', '')} ({by.get('initials', '')}): {record.get('revision_note', '')}"))
+    if record.get('superseded_files'):
+        lines.append(('Superseded files (kept)', ', '.join(record['superseded_files'])))
+    return lines
+
+
+def _summary_lines(record):
     kind = record['kind']
     by = record['created_by']
     who = f"{by['name']} ({by['initials']}, {ids.lab_name(by['lab']) if by.get('lab') else ''})"

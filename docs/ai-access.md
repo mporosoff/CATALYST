@@ -72,15 +72,27 @@ It needs Python 3.10 or later. The reader refuses any request other than a read,
 Every record is JSON with `format`, `kind` (`sample`, `data`, `shipment` or `procedure`), `id`, `created_by` (`name`, `initials`, `lab`) and `created_at`, plus:
 
 - **sample:**
-  - `synthesis_date`, `composition`, `procedure` (`id`, `version`, `name`)
-  - `recipe` (the fields in `records.RECIPE_FIELDS`; numbers in °C, h, °C/min, g; `metals_parsed` = `[{component, wt_pct}]`)
+  - `source` (`synthesized` or `commercial`), `synthesis_date` or `received_date`, `composition`
+  - `procedure` (`id`, `version`, `name`), or `commercial` (`supplier`, `product`, `catalog_number`, `lot`, `form`)
+  - `recipe` (the fields in `records.RECIPE_FIELDS`; numbers in °C, h, °C/min, g; `components` = `[{component, loading, unit}]`)
   - `deviations` (automatic differences from the master recipe), `deviation_notes`
-  - `amount_made_g`, `parent_id`, `notes`, `files`
+  - `amount_g` (older records: `amount_made_g`), `parent_id`, `notes`, `files`
 - **data:**
   - `sample_id`, `technique` (code) and `technique_label`, `date`, `title`
   - `conditions` (technique-specific, all optional)
   - `pooled_with` (other samples in the same test), `notes`
   - `files` (`name`, `sha256`, `size_bytes`)
 - **shipment:** `sample_id`, `from_lab`, `to_lab`, `date`, `amount`, `tracking`, `notes`
+
+## Corrections
+
+A corrected record keeps its ID and adds:
+
+- `revision` (1 for an uncorrected record), `revised_at`, `revised_by`, `revision_note`
+- `history`: one entry per revision (`revision`, `at`, `by`, `note`, `changes`, `status`)
+- `status`: `active`, `withdrawn` (data that should not be used) or `registered_in_error` (a sample ID that was wrong); `status_note` gives the reason, and a retired sample may have `replaced_by`
+- `superseded_files`: files that were replaced. They stay in SciSure but are not listed in `files`.
+
+The reader and exports return only the latest revision. They leave out withdrawn data and samples registered in error unless you ask for a sample by its ID, in which case `get_sample` includes a `warning`. The `status`, `revision` and `last_corrected` columns in the tables show what was corrected.
 
 Technique codes: RXN, HTE, PILOT, XRD, BET, CHEM, TPR, TPD, TPO, TEM, SEM, XPS, XAS, INSITU, RAMAN, IR, ICP, TGA, CALC, OTHER.

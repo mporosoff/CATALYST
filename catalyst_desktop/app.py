@@ -37,7 +37,7 @@ def readable_note(saved):
     if not saved.get('readable_warning'):
         return ''
     return ('\n\nThe record is saved, but its readable copy in SciSure could not be written '
-        f"({saved['readable_warning']}). Settings → Coordinator tools → “Write readable copies” adds it later.")
+        f"({saved['readable_warning']}). Settings → Coordinator tools → “Repair readable copies and the sample list” fixes it later.")
 
 
 def friendly(error):
@@ -324,7 +324,7 @@ class App:
             return
         def work(progress):
             progress('Loading samples…')
-            samples = self.store.list_samples()
+            samples = self.store.list_samples(include_retired=True)
             progress('Loading procedures…')
             return samples, self.store.list_procedures()
         def done(result):
@@ -382,10 +382,28 @@ class App:
         self.run('Downloading…', work, lambda saved: self.info(f'Saved {len(saved)} file(s) to {folder}. Each file was '
             'checked against its original checksum.'))
 
+    def active_samples(self):
+        return [s for s in self.samples if s.get('status') != 'registered_in_error']
+
+    def can_change(self, record, quiet=False):
+        """Corrections are made by the lab that created the record, or by the coordinator."""
+        if not self.settings.has_profile():
+            if not quiet: self.error('Set up your profile in Settings first.')
+            return False
+        if records.can_change(record, self.settings.profile, self.settings.coordinator):
+            return True
+        if not quiet:
+            lab = (record.get('created_by') or {}).get('lab', '')
+            name = ids.lab_name(lab) if lab in ids.LAB_CODES else (lab or 'the lab that created it')
+            self.error(f'Only {name} (who saved this record) or the CATALYST coordinator can correct it. Ask them to make '
+                'the change; it will be kept in the record\'s history.')
+        return False
+
     def sample_choices(self):
-        recent = [s for s in self.settings.recent_samples if any(x['id'] == s for x in self.samples)]
-        order = recent + [s['id'] for s in self.samples if s['id'] not in recent]
-        by_id = {s['id']: s for s in self.samples}
+        active = self.active_samples()
+        recent = [s for s in self.settings.recent_samples if any(x['id'] == s for x in active)]
+        order = recent + [s['id'] for s in active if s['id'] not in recent]
+        by_id = {s['id']: s for s in active}
         return [(sid, f"{sid}  ·  {by_id[sid]['composition']}") for sid in order]
 
     def close(self):
@@ -546,6 +564,9 @@ class SamplesPage(Page):
         self.view.bind('<Return>', lambda _e: self.open())
         self.count = ttk.Label(foot, style='Hint.TLabel')
         self.count.pack(side='left')
+        self.show_retired = tk.BooleanVar(value=False)
+        ttk.Checkbutton(foot, text='Show samples registered in error', variable=self.show_retired,
+            command=self.render).pack(side='left', padx=16)
         ttk.Button(foot, text='Open sample', style='Primary.TButton', command=self.open).pack(side='right')
         self.sort_key, self.sort_reverse = 'date', True
 
@@ -577,6 +598,7 @@ class SamplesPage(Page):
         since = self.since.date()
         result = []
         for s in self.app.samples:
+            if s.get('status') == 'registered_in_error' and not self.show_retired.get(): continue
             text = f"{s['id']} {s['composition']} {s.get('origin', s['procedure'])}".casefold()
             if words and not all(w in text for w in words): continue
             if self.lab.get() != ALL and s['lab_name'] != self.lab.get(): continue
@@ -606,10 +628,13 @@ class SamplesPage(Page):
             self.notice.pack(fill='x', pady=(0, 12), before=self.card)
         self.view.delete(*self.view.get_children())
         rows = self.filtered()
+        self.view.tag_configure('retired', foreground=MUTED)
         for s in rows:
-            self.view.insert('', 'end', iid=str(s['experiment_id']), values=(s['id'], s['composition'], s.get('origin', s['procedure']), s['lab_name'],
-                s['initials'], s['date']))
-        total = len(app.samples)
+            retired = s.get('status') == 'registered_in_error'
+            self.view.insert('', 'end', iid=str(s['experiment_id']), values=(s['id'] + ('  (registered in error)' if retired else ''),
+                s['composition'], s.get('origin', s['procedure']), s['lab_name'], s['initials'], s['date']),
+                tags=('retired',) if retired else ())
+        total = len(app.samples) if self.show_retired.get() else len(app.active_samples())
         self.count.configure(text=f'{total} sample(s)' + (f' · showing {len(rows)}' if len(rows) != total else ''))
 
     def selected(self):
@@ -645,6 +670,16 @@ class SamplePage(Page):
         derive.pack(side='left')
         self.record_buttons = [upload, ship, derive]
         ttk.Button(self.actions, text='Refresh', command=self.reload).pack(side='right')
+        more = ttk.Menubutton(self.actions, text='Fix a mistake ▾')
+        menu = tk.Menu(more, tearoff=0)
+        menu.add_command(label='Correct this sample\'s details…', command=self.correct_sample)
+        menu.add_command(label='Registered in error (retire this ID)…', command=self.retire_sample)
+        menu.add_separator()
+        menu.add_command(label='History of corrections', command=lambda: self.history(self.app.current.get('record')))
+        menu.add_command(label='Restore this sample (coordinator)…', command=self.restore_sample)
+        more['menu'] = menu
+        more.pack(side='right', padx=6)
+        self.fix_button = more
         self.warning = ttk.Label(self.frame, style='Warn.TLabel', wraplength=900, justify='left')
         body = ttk.Frame(self.frame, style='Page.TFrame')
         body.pack(fill='both', expand=True)
@@ -665,9 +700,20 @@ class SamplePage(Page):
         ttk.Label(head, text='Data from every lab', style='Sub.TLabel').pack(side='left')
         ttk.Button(head, text='Download files', command=self.download_data).pack(side='right')
         ttk.Button(head, text='Details', command=self.details).pack(side='right', padx=6)
+        fix = ttk.Menubutton(head, text='Fix ▾')
+        menu = tk.Menu(fix, tearoff=0)
+        menu.add_command(label='Correct this record…', command=self.correct_data)
+        menu.add_command(label='Withdraw this record…', command=self.withdraw_data)
+        menu.add_command(label='History of corrections', command=lambda: self.history((self.selected_data() or {}).get('record')))
+        menu.add_command(label='Restore a withdrawn record (coordinator)…', command=self.restore_data)
+        fix['menu'] = menu
+        fix.pack(side='right')
+        self.show_withdrawn = tk.BooleanVar(value=False)
+        self.withdrawn_toggle = ttk.Checkbutton(data.body, variable=self.show_withdrawn, command=self.shown)
         frame, self.data_view = tree(data.body, (('id', 'Data ID', 215), ('technique', 'Technique', 170),
             ('date', 'Measured', 90), ('lab', 'Lab', 90), ('by', 'By', 45), ('files', 'Files', 40)), height=6)
         frame.pack(fill='both', expand=True, pady=(8, 0))
+        self.data_frame = frame
         self.data_view.bind('<Double-1>', lambda _e: self.details())
         ship = Card(right, padding=16)
         ship.pack(fill='x', pady=(14, 0))
@@ -693,8 +739,10 @@ class SamplePage(Page):
         lines = records.summary_lines(record) if record else [('Registration not finished', 'This sample\'s '
             'registration did not finish (the app closed or the connection dropped while saving). If it is yours, '
             'register it again from New sample with the same details; the same ID is reused.')]
+        retired = records.status_of(record) == 'registered_in_error' if record else False
         for button in self.record_buttons:
-            button.state(['!disabled'] if record else ['disabled'])
+            button.state(['!disabled'] if record and not retired else ['disabled'])
+        self.fix_button.state(['!disabled'] if record else ['disabled'])
         if record:
             lines += records.recipe_lines(record['recipe'])
         for label, value in lines:
@@ -705,19 +753,34 @@ class SamplePage(Page):
         else:
             self.sample_files.pack_forget()
         self.data_view.delete(*self.data_view.get_children())
-        for item in current['data']:
+        self.data_view.tag_configure('withdrawn', foreground=MUTED)
+        withdrawn = current.get('withdrawn', [])
+        self.withdrawn_toggle.configure(text=f'Show {len(withdrawn)} withdrawn')
+        (self.withdrawn_toggle.pack(anchor='w', pady=(6, 0), after=self.data_frame) if withdrawn else self.withdrawn_toggle.pack_forget())
+        shown_data = current['data'] + (withdrawn if self.show_withdrawn.get() else [])
+        for item in sorted(shown_data, key=lambda d: (d['date'], d['id'])):
+            gone = item in withdrawn
             self.data_view.insert('', 'end', iid=str(item['section_id']), values=(item['id'],
-                ids.TECHNIQUES.get(item['technique'], item['technique']), item['date'],
-                ids.lab_name(item['lab']) if item['lab'] in ids.LAB_CODES else item['lab'], item['initials'], len(item['files'])))
+                ('Withdrawn · ' if gone else '') + ids.TECHNIQUES.get(item['technique'], item['technique']), item['date'],
+                ids.lab_name(item['lab']) if item['lab'] in ids.LAB_CODES else item['lab'], item['initials'], len(item['files'])),
+                tags=('withdrawn',) if gone else ())
         self.ship_view.delete(*self.ship_view.get_children())
         for item in current['shipments']:
             r = item['record']
             self.ship_view.insert('', 'end', values=(r['date'], f"{ids.lab_name(r['from_lab'])} → {ids.lab_name(r['to_lab'])}",
                 r.get('amount', ''), r['created_by']['initials'], ' · '.join(x for x in (r.get('tracking'), r.get('notes')) if x)))
         self.warning.pack_forget()
+        notes = []
+        if retired:
+            replacement = record.get('replaced_by')
+            notes.append('This sample ID was registered in error and must not be used'
+                + (f'. Use {replacement} instead.' if replacement else '.') + (f" Reason: {record.get('status_note')}"
+                if record.get('status_note') else ''))
         if current['incomplete']:
-            self.warning.configure(text=f"{len(current['incomplete'])} upload(s) for this sample did not finish (the app was closed "
+            notes.append(f"{len(current['incomplete'])} upload(s) for this sample did not finish (the app was closed "
                 'or the connection dropped). Upload those files again; the unfinished copies are ignored.')
+        if notes:
+            self.warning.configure(text='\n\n'.join(notes))
             self.warning.pack(fill='x', pady=(0, 10), before=self.body)
 
     def reload(self):
@@ -725,7 +788,103 @@ class SamplePage(Page):
 
     def selected_data(self):
         selection = self.data_view.selection()
-        return next((d for d in self.app.current['data'] if str(d['section_id']) == selection[0]), None) if selection else None
+        items = self.app.current['data'] + self.app.current.get('withdrawn', [])
+        return next((d for d in items if str(d['section_id']) == selection[0]), None) if selection else None
+
+    # corrections --------------------------------------------------------
+    def history(self, record):
+        if not record:
+            return self.app.error('Select a record first.')
+        HistoryDialog(self.app, record)
+
+    def correct_sample(self):
+        c = self.app.current
+        record = c.get('record')
+        if not record or not self.app.can_change(record) or not self.app.connected():
+            return
+        if records.status_of(record) == 'registered_in_error':
+            return self.app.error('This sample was registered in error. Register the correct sample instead.')
+        CorrectionDialog(self.app, record, c['sample']['experiment_id'], c['sample_item'],
+            lambda: self.app.refresh(then=lambda: self.app.open_sample(c['sample']['experiment_id'])))
+
+    def retire_sample(self):
+        app, c = self.app, self.app.current
+        record = c.get('record')
+        if not record or not app.can_change(record) or not app.connected():
+            return
+        if records.status_of(record) == 'registered_in_error':
+            return app.error('This sample is already marked as registered in error.')
+        attached = len(c['data']) + len(c['shipments'])
+        warning = (f' It already has {attached} data or shipping record(s); those stay attached to this ID, so only do '
+            'this if they belong to the wrong ID too.' if attached else '')
+        def go(reason, replacement):
+            profile = app.settings.profile
+            app.run('Marking the sample as registered in error…',
+                lambda progress: app.store.retire_sample(c, profile, reason, replacement, progress),
+                lambda saved: (app.info(f"{record['id']} is marked as registered in error. It is hidden from the sample list "
+                    'and exports, and its ID is never reused.' + ('' if replacement else ' Register the sample again with '
+                    'the correct details from New sample.') + readable_note(saved)), app.refresh(then=lambda: app.show('samples'))))
+        ReasonDialog(app, f"Registered in error: {record['id']}", 'Use this when the ID itself is wrong (wrong date, '
+            'researcher or lab) or the sample was entered twice. Nothing is deleted: the record stays in SciSure, marked as '
+            'registered in error and linked to the correct sample.' + warning, 'Mark as registered in error', go,
+            replacement_for=record['id'])
+
+    def _restore(self, item, experiment_id, kind_text, after):
+        app = self.app
+        record = (item or {}).get('record')
+        if not record:
+            return app.error('Select a record first.')
+        if records.status_of(record) == 'active':
+            return app.error(f'This {kind_text} is not withdrawn or retired, so there is nothing to restore.')
+        if not app.settings.coordinator:
+            return app.error('Only the CATALYST coordinator can restore a record. Ask them; the reason is kept in its history.')
+        if not app.connected():
+            return
+        def go(reason, _replacement):
+            profile = app.settings.profile
+            app.run('Restoring…', lambda progress: app.store.restore(experiment_id, item, profile, reason, progress),
+                lambda saved: (app.info(f"{record['id']} is active again." + readable_note(saved)), after()))
+        ReasonDialog(app, f"Restore {record['id']}", 'The record becomes active again and shows up in the sample list and '
+            'exports. The earlier status stays in its history.', 'Restore', go)
+
+    def restore_sample(self):
+        c = self.app.current
+        self._restore(c.get('sample_item'), c['sample']['experiment_id'], 'sample',
+            lambda: self.app.refresh(then=lambda: self.app.open_sample(c['sample']['experiment_id'])))
+
+    def restore_data(self):
+        item = self.selected_data()
+        if item and records.status_of(item['record']) == 'withdrawn':
+            return self._restore(item, self.app.current['sample']['experiment_id'], 'record', self.reload)
+        self.app.error('Tick "Show withdrawn" under the data list, then select the withdrawn record to restore.')
+
+    def correct_data(self):
+        item = self.selected_data()
+        if not item:
+            return self.app.error('Select a data record first.')
+        if not self.app.can_change(item['record']) or not self.app.connected():
+            return
+        if records.status_of(item['record']) == 'withdrawn':
+            return self.app.error('This record was withdrawn. Upload the data again as a new record instead.')
+        CorrectionDialog(self.app, item['record'], self.app.current['sample']['experiment_id'], item, self.reload)
+
+    def withdraw_data(self):
+        app, item = self.app, self.selected_data()
+        if not item:
+            return app.error('Select a data record first.')
+        if not app.can_change(item['record']) or not app.connected():
+            return
+        if records.status_of(item['record']) == 'withdrawn':
+            return app.error('This record is already withdrawn.')
+        sample = app.current['sample']
+        def go(reason, _replacement):
+            profile = app.settings.profile
+            app.run('Withdrawing…', lambda progress: app.store.withdraw_data(sample, item, profile, reason, progress),
+                lambda saved: (app.info(f"{item['id']} is withdrawn. It is hidden from the sample page and from exports, "
+                    'but kept in SciSure with its reason.' + readable_note(saved)), self.reload()))
+        ReasonDialog(app, f"Withdraw {item['id']}", 'Use this for data that should not be used (e.g. a failed measurement '
+            'or data put on the wrong sample). Nothing is deleted: the record and its files stay in SciSure, marked as '
+            'withdrawn with your reason. Its data ID is not reused.', 'Withdraw record', go)
 
     def details(self):
         item = self.selected_data()
@@ -875,6 +1034,360 @@ class ShipmentDialog(tk.Toplevel):
                 self.save_button.state(['!disabled'])
             app.error(error)
         app.run('Saving shipment…', lambda progress: app.store.add_shipment(self.sample, build, progress), done, failed)
+
+
+# ============================================================================ corrections
+LOCKED = {
+    'sample': 'The sample ID, lab, researcher and date stay as they are, because the ID is built from them. If one of those '
+        'is wrong, close this and use “Registered in error…”, then register the sample again.',
+    'data': 'The data ID, sample and technique stay as they are. If the data belongs to another sample or technique, '
+        'withdraw this record and upload it again in the right place.',
+    'procedure': 'This fixes mistakes in this version only (description, written steps, documents). To change the recipe '
+        'itself, save a new version instead. Samples keep the version they were made with.',
+}
+
+
+class CorrectionDialog(tk.Toplevel):
+    """Correct a published record. The ID and what it is built from are fixed; every change is kept in the history."""
+
+    def __init__(self, app, record, experiment_id, section, done):
+        super().__init__(app.root)
+        self.app, self.record, self.experiment_id, self.section, self.done = app, record, experiment_id, section, done
+        self.kind = record['kind']
+        self.procedure = None
+        self._pending = None
+        self.title(f"Correct {record['id']}")
+        self.configure(background='white', padx=22, pady=18)
+        self.transient(app.root)
+        self.geometry('900x720')
+        ttk.Label(self, text=f"Correct {record['id']}", style='ID.TLabel').pack(anchor='w')
+        ttk.Label(self, text=LOCKED[self.kind], style='Hint.TLabel', wraplength=840, justify='left').pack(anchor='w', pady=(2, 8))
+        buttons = ttk.Frame(self)
+        buttons.pack(side='bottom', fill='x', pady=(12, 0))
+        self.save_button = ttk.Button(buttons, text='Preview & save', style='Primary.TButton', command=self.preview)
+        self.save_button.pack(side='right')
+        ttk.Button(buttons, text='Cancel', command=self.destroy).pack(side='right', padx=6)
+        scroll = ScrollFrame(self)
+        scroll.pack(fill='both', expand=True)
+        body = scroll.body
+        getattr(self, 'build_' + self.kind)(body)
+        files = ttk.Frame(body)
+        files.pack(fill='x', pady=(14, 0))
+        ttk.Label(files, text='Files', style='Field.TLabel').pack(anchor='w')
+        self.supersede = {}
+        if record.get('files'):
+            ttk.Label(files, text='Tick a file that was wrong. It stays in SciSure, marked as superseded, but is no longer '
+                'offered as the current data.', style='Hint.TLabel', wraplength=820, justify='left').pack(anchor='w')
+            for f in record['files']:
+                var = tk.BooleanVar(value=False)
+                ttk.Checkbutton(files, text=f"Wrong or replaced:  {f['name']}", variable=var).pack(anchor='w', pady=1)
+                self.supersede[f['name']] = var
+        self.files = FileList(files, title='Add corrected or extra files…')
+        self.files.pack(fill='x', pady=(6, 0))
+        why = ttk.Frame(body)
+        why.pack(fill='x', pady=(14, 0))
+        self.reason = text_box(why, height=2)
+        field(why, 0, 'What was wrong? (required, kept in the history)', self.reason,
+            'e.g. "Loading was 12 wt%, not 10" or "Uploaded the wrong scan".')
+        why.columnconfigure(0, weight=1)
+        self.grab_set()
+
+    # ---------------------------------------------------------------- forms
+    def build_sample(self, body):
+        r, app = self.record, self.app
+        self.bought = r.get('source') == 'commercial'
+        grid = ttk.Frame(body)
+        grid.pack(fill='x')
+        row = 0
+        self.commercial = {}
+        if self.bought:
+            for index, (key, label, hint) in enumerate(records.COMMERCIAL_FIELDS):
+                widget = ttk.Entry(grid, width=36)
+                widget.insert(0, (r.get('commercial') or {}).get(key) or '')
+                field(grid, (index // 2) * 2, label, widget, hint, column=index % 2)
+                self.commercial[key] = widget
+            row = ((len(records.COMMERCIAL_FIELDS) + 1) // 2) * 2
+        else:
+            self.procedure_box = SearchCombo(grid, width=50, on_select=self.pick_procedure)
+            self.procedure_box.set_items([(p['id'], f"{p['id']}  ·  {p['name']}") for p in app.procedures])
+            self.procedure_box.set_value(r['procedure'].get('id'))
+            field(grid, 0, 'Synthesis procedure', self.procedure_box, 'Change it only if the wrong procedure was chosen.', span=2)
+            self.procedure_note = ttk.Label(grid, style='Hint.TLabel', wraplength=800, justify='left')
+            self.procedure_note.grid(row=2, column=0, columnspan=2, sticky='w')
+            row = 3
+            self.pick_procedure(r['procedure'].get('id'))
+        self.composition = ttk.Entry(grid, width=50)
+        self.composition.insert(0, r.get('composition') or '')
+        self.composition.bind('<KeyRelease>', lambda _e: setattr(self, '_composition_auto', False))
+        field(grid, row, 'Composition', self.composition, 'Follows the metals/phases and support below unless you type '
+            'your own. ' + records.COMPOSITION_HELP)
+        self._composition_auto = (r.get('composition') or '') == records.suggest_composition(r.get('recipe') or {})
+        self.amount = ttk.Entry(grid, width=20)
+        amount = r.get('amount_g', r.get('amount_made_g'))
+        self.amount.insert(0, '' if amount is None else records.format_value('amount_g', amount))
+        field(grid, row, 'Amount received (g)' if self.bought else 'Amount made (g)', self.amount, column=1)
+        self.label = ttk.Entry(grid, width=40)
+        self.label.insert(0, r.get('label') or '')
+        field(grid, row + 2, 'Notebook label', self.label)
+        self.parent = SearchCombo(grid, width=40)
+        self.parent.set_items([c for c in app.sample_choices() if c[0] != r['id']])
+        if r.get('parent_id'):
+            self.parent.set_items([(r['parent_id'], r['parent_id'])] + [c for c in app.sample_choices()
+                if c[0] not in (r['id'], r['parent_id'])])
+            self.parent.set_value(r['parent_id'])
+        field(grid, row + 2, 'Made from another sample', self.parent, column=1)
+        grid.columnconfigure(0, weight=1)
+        grid.columnconfigure(1, weight=1)
+        recipe = ttk.Frame(body)
+        recipe.pack(fill='x', pady=(12, 0))
+        ttk.Label(recipe, text='Stated composition' if self.bought else 'Recipe used', style='Sub.TLabel').grid(row=0, column=0, sticky='w')
+        self.recipe = RecipeFields(recipe, self.recipe_changed)
+        self.recipe.set(r.get('recipe'))
+        if self.bought:
+            self.recipe.show_only(('components', 'support'))
+        extra = ttk.Frame(body)
+        extra.pack(fill='x')
+        if not self.bought:
+            self.deviations = text_box(extra, height=3)
+            set_text(self.deviations, r.get('deviation_notes'))
+            field(extra, 0, 'Anything else that differed', self.deviations)
+        self.notes = text_box(extra, height=3)
+        set_text(self.notes, r.get('notes'))
+        field(extra, 2, 'Notes', self.notes)
+        extra.columnconfigure(0, weight=1)
+
+    def recipe_changed(self):
+        if getattr(self, '_composition_auto', False) and hasattr(self, 'recipe'):
+            suggestion = records.suggest_composition(self.recipe.get())
+            if suggestion:
+                self.composition.delete(0, 'end')
+                self.composition.insert(0, suggestion)
+
+    def pick_procedure(self, procedure_id):
+        original = self.record['procedure']
+        self.procedure = None
+        if not procedure_id:
+            return
+        def loaded(value):
+            if not self.winfo_exists():
+                return
+            if not value or not value['versions']:
+                self.procedure_note.configure(text='This procedure could not be loaded. Refresh the sample list and try again.')
+                return
+            wanted = original.get('version') if procedure_id == original.get('id') else None
+            version = next((v for v in value['versions'] if v['version'] == wanted), value['versions'][-1])['record']
+            self.procedure = dict(id=value['id'], version=version['version'], name=version['name'], recipe=version['recipe'])
+            self.procedure_note.configure(text=f"Differences are compared with {value['id']} version {version['version']}"
+                + (' (the version this sample was registered with).' if wanted == version['version'] else ' (latest).'))
+        self.app.load_procedure(procedure_id, loaded)
+
+    def build_data(self, body):
+        r = self.record
+        grid = ttk.Frame(body)
+        grid.pack(fill='x')
+        ttk.Label(grid, text=f"{r['technique_label']} data for {r['sample_id']}", style='Sub.TLabel').grid(row=0, column=0, sticky='w')
+        self.when = DateEntry(grid, value=r.get('date'))
+        field(grid, 1, 'Date measured', self.when)
+        self.title_entry = ttk.Entry(grid, width=50)
+        self.title_entry.insert(0, r.get('title') or '')
+        field(grid, 1, 'Short description', self.title_entry, column=1)
+        self.pooled = ttk.Entry(grid, width=50)
+        self.pooled.insert(0, ', '.join(r.get('pooled_with') or []))
+        field(grid, 3, 'Tested together with other samples', self.pooled, 'Other sample IDs, separated by commas.', span=2)
+        grid.columnconfigure(0, weight=1)
+        grid.columnconfigure(1, weight=1)
+        conditions = ttk.Frame(body)
+        conditions.pack(fill='x', pady=(10, 0))
+        ttk.Label(conditions, text='Conditions', style='Sub.TLabel').grid(row=0, column=0, sticky='w')
+        self.condition_widgets = {}
+        saved = r.get('conditions') or {}
+        for index, (key, label, kind, choices, hint) in enumerate(records.condition_fields(r['technique'])):
+            widget = ttk.Combobox(conditions, values=choices, width=30) if kind == 'choice' else ttk.Entry(conditions, width=32)
+            widget.insert(0, saved.get(key, ''))
+            field(conditions, 1 + (index // 3) * 2, label, widget, hint, column=index % 3)
+            self.condition_widgets[key] = widget
+        for column in range(3):
+            conditions.columnconfigure(column, weight=1)
+        extra = ttk.Frame(body)
+        extra.pack(fill='x')
+        self.notes = text_box(extra, height=3)
+        set_text(self.notes, r.get('notes'))
+        field(extra, 0, 'Notes', self.notes)
+        extra.columnconfigure(0, weight=1)
+
+    def build_procedure(self, body):
+        r = self.record
+        grid = ttk.Frame(body)
+        grid.pack(fill='x')
+        ttk.Label(grid, text=f"{r['id']} version {r['version']}  ·  {r['name']}", style='Sub.TLabel').grid(row=0, column=0, sticky='w')
+        self.description = text_box(grid, height=3)
+        set_text(self.description, r.get('description'))
+        field(grid, 1, 'Purpose / description', self.description)
+        self.steps = text_box(grid, height=8)
+        set_text(self.steps, (r.get('recipe') or {}).get('steps'))
+        field(grid, 3, 'Step-by-step procedure', self.steps)
+        grid.columnconfigure(0, weight=1)
+
+    # ---------------------------------------------------------------- building the corrected record
+    def updated(self):
+        r, profile = self.record, self.app.settings.profile
+        if self.kind == 'sample':
+            problems = []
+            if not self.bought and not self.procedure:
+                problems.append('The procedure is still loading (or could not be loaded). Wait a moment and try again.')
+            parent = self.parent.get_value() or ''
+            if parent == r['id']:
+                problems.append('A sample cannot be made from itself.')
+            record, more = records.sample_record(sample_id=r['id'], profile=profile, synthesis_date=records.sample_date(r),
+                procedure=None if self.bought else (self.procedure or dict(r['procedure'], recipe=r.get('recipe'))),
+                source=r.get('source') or 'synthesized',
+                commercial={k: w.get() for k, w in self.commercial.items()} if self.bought else None,
+                recipe=self.recipe.get(), composition=self.composition.get(), label=self.label.get(),
+                amount_g=self.amount.get(), parent_id=parent, notes=text_value(self.notes),
+                deviation_notes='' if self.bought else text_value(self.deviations), files=r.get('files', []),
+                app_version=__version__)
+            same_version = self.procedure and (self.procedure['id'], self.procedure['version']) == (
+                r['procedure'].get('id'), r['procedure'].get('version'))
+            if same_version and record['recipe'].get('steps') == (r.get('recipe') or {}).get('steps'):
+                # The written steps weren't touched: keep what was recorded, even if the procedure's text was corrected since.
+                record['deviations'] = [d for d in record['deviations'] if d['field'] != 'steps'] + [
+                    d for d in r.get('deviations', []) if d['field'] == 'steps']
+            return record, problems + more
+        if self.kind == 'data':
+            conditions = dict(r.get('conditions') or {}, **{k: w.get() for k, w in self.condition_widgets.items()})
+            record, problems = records.data_record(data_id=r['id'], sample_id=r['sample_id'], technique=r['technique'],
+                profile=profile, measured_date=self.when.get(), conditions=conditions, notes=text_value(self.notes),
+                title=self.title_entry.get(), pooled_with=self.pooled.get().split(','), files=r.get('files', []),
+                app_version=__version__)
+            return record, [p for p in problems if 'data file' not in p]  # files are checked below
+        record, problems = records.procedure_record(procedure_id=r['id'], version=r['version'], name=r['name'],
+            profile=profile, recipe=dict(r.get('recipe') or {}, steps=text_value(self.steps)),
+            description=text_value(self.description), files=r.get('files', []), app_version=__version__)
+        return record, problems
+
+    def preview(self):
+        app, r = self.app, self.record
+        if not app.settings.has_profile():
+            return app.error('Set up your profile in Settings first.')
+        try:
+            updated, problems = self.updated()
+        except (records.RecordError, ids.IdError) as error:
+            return app.error(error)
+        record, more = records.revise(r, updated, app.settings.profile, text_value(self.reason))
+        problems = problems + more
+        supersede = [name for name, var in self.supersede.items() if var.get()]
+        new_files = list(self.files.items)
+        try:
+            check_files(new_files, required=False)
+        except StoreError as error:
+            problems.append(str(error))
+        shown_files = [f for f in r.get('files', []) if f['name'] not in supersede] + [
+            dict(name=i.name, sha256='', size_bytes=i.path.stat().st_size if i.path else 0) for i in new_files]
+        shown = dict(record, files=shown_files, superseded_files=sorted(set(record.get('superseded_files') or []) | set(supersede)))
+        changes = records.changed_fields(r, shown)
+        if not changes:
+            problems.append('Nothing has been changed yet.')
+        if self.kind == 'data' and not shown_files:
+            problems.append('A data record needs at least one current file. Add the corrected file, or withdraw the record instead.')
+        if not app.connected(quiet=True):
+            problems.append('Connect to SciSure to save.')
+        self._pending = (record, new_files, supersede)
+        lines = [('What changes', ', '.join(changes) or '—'), ('Reason', text_value(self.reason) or '—')]
+        lines += [(label, value) for label, value in records.summary_lines(shown) if label not in ('Status',)]
+        preview = PreviewDialog(app, 'Save correction', f"{r['id']}  ·  revision {records.revision_of(record)}", lines,
+            new_files, problems, self.save)
+        if isinstance(preview, tk.Toplevel):  # keep this window modal after "Back to editing"
+            preview.bind('<Destroy>', lambda e: e.widget is preview and self.winfo_exists() and self.grab_set(), add='+')
+
+    def save(self):
+        app, r = self.app, self.record
+        record, new_files, supersede = self._pending
+        expected = records.revision_of(r)
+        self.save_button.state(['disabled'])
+        def work(progress):
+            return app.store.revise_record(self.experiment_id, self.section, record, new_files, supersede, expected, progress)
+        def done(saved):
+            if self.winfo_exists():
+                self.destroy()
+            app.info(f"{r['id']} is corrected (revision {records.revision_of(saved['record'])}). Earlier versions are kept "
+                'in its history.' + readable_note(saved))
+            self.done()
+        def failed(error):
+            if self.winfo_exists():
+                self.save_button.state(['!disabled'])
+            app.error(friendly(error))
+        app.run('Saving correction…', work, done, failed)
+
+
+class ReasonDialog(tk.Toplevel):
+    """Ask why (required) before withdrawing data or retiring a sample."""
+
+    def __init__(self, app, title, message, button, on_ok, replacement_for=None):
+        super().__init__(app.root)
+        self.app, self.on_ok = app, on_ok
+        self.title(title)
+        self.configure(background='white', padx=22, pady=18)
+        self.transient(app.root)
+        ttk.Label(self, text=title, style='Sub.TLabel').pack(anchor='w')
+        ttk.Label(self, text=message, style='Hint.TLabel', wraplength=520, justify='left').pack(anchor='w', pady=(4, 0))
+        form = ttk.Frame(self)
+        form.pack(fill='x')
+        self.reason = text_box(form, height=3, width=56)
+        field(form, 0, 'Reason (required, kept in the history)', self.reason)
+        self.replacement = None
+        if replacement_for:
+            self.replacement = SearchCombo(form, width=50)
+            self.replacement.set_items([c for c in app.sample_choices() if c[0] != replacement_for])
+            field(form, 2, 'Correct sample, if already registered (optional)', self.replacement,
+                'Links the two, so anyone who finds the wrong ID is sent to the right one. You can also register it afterwards.')
+        form.columnconfigure(0, weight=1)
+        buttons = ttk.Frame(self)
+        buttons.pack(fill='x', pady=(16, 0))
+        ttk.Button(buttons, text=button, style='Primary.TButton', command=self.ok).pack(side='right')
+        ttk.Button(buttons, text='Cancel', command=self.destroy).pack(side='right', padx=6)
+        self.grab_set()
+        self.reason.focus_set()
+
+    def ok(self):
+        reason = text_value(self.reason)
+        if not reason:
+            return self.app.error('Say briefly why. It is kept with the record.')
+        replacement = self.replacement.get_value() if self.replacement else None
+        if self.replacement and self.replacement.get().strip() and not replacement:
+            return self.app.error('Choose the correct sample from the list (type part of its ID), or leave the field empty.')
+        self.destroy()
+        self.on_ok(reason, replacement or None)
+
+
+class HistoryDialog(tk.Toplevel):
+    def __init__(self, app, record):
+        super().__init__(app.root)
+        self.title(f"History of {record['id']}")
+        self.configure(background='white', padx=22, pady=18)
+        self.transient(app.root)
+        ttk.Label(self, text=f"History of {record['id']}", style='ID.TLabel').pack(anchor='w')
+        box = tk.Text(self, width=86, height=18, wrap='word', relief='flat', highlightthickness=1, highlightbackground=LINE,
+            font=(FONT, 10), padx=10, pady=8)
+        box.pack(fill='both', expand=True, pady=(10, 0))
+        history = record.get('history') or []
+        if not history:
+            by = record.get('created_by') or {}
+            box.insert('end', f"Revision 1 · {str(record.get('created_at', ''))[:10]} · {by.get('name', '')}\n"
+                'Original record. It has not been corrected.\n')
+        for entry in history:
+            by = entry.get('by') or {}
+            who = f"{by.get('name', '')} ({ids.lab_name(by['lab']) if by.get('lab') in ids.LAB_CODES else by.get('lab', '')})"
+            box.insert('end', f"Revision {entry.get('revision')} · {str(entry.get('at', ''))[:16].replace('T', ' ')} · {who}\n")
+            box.insert('end', f"    {entry.get('note', '')}\n")
+            if entry.get('changes'):
+                box.insert('end', f"    Changed: {', '.join(entry['changes'])}\n")
+            if entry.get('status') and entry['status'] != 'active':
+                box.insert('end', f"    Status: {records.STATUSES.get(entry['status'], entry['status'])}\n")
+            box.insert('end', '\n')
+        if record.get('superseded_files'):
+            box.insert('end', 'Superseded files (kept in SciSure, not current): ' + ', '.join(record['superseded_files']) + '\n')
+        box.configure(state='disabled')
+        ttk.Button(self, text='Close', command=self.destroy).pack(anchor='e', pady=(12, 0))
 
 
 # ============================================================================ recipe fields
@@ -1536,6 +2049,8 @@ class ProceduresPage(Page):
         ttk.Button(buttons, text='Make a sample with this', style='Primary.TButton', command=self.make_sample).pack(side='left')
         ttk.Button(buttons, text='Save a new version', command=self.new_version).pack(side='left', padx=6)
         ttk.Button(buttons, text='Download documents', command=self.download).pack(side='left')
+        ttk.Button(buttons, text='Correct this version…', command=self.correct).pack(side='left', padx=6)
+        ttk.Button(buttons, text='History', command=self.history).pack(side='left')
         buttons.pack_configure(anchor='w')
         self.details = ScrollFrame(right.body)
         self.details.pack(fill='both', expand=True, pady=(10, 0))
@@ -1597,6 +2112,23 @@ class ProceduresPage(Page):
         version = self.current_version()
         if version and version['files']:
             self.app.download_files(version['section_id'], version['files'], version['record']['files'])
+
+    def correct(self):
+        version, app = self.current_version(), self.app
+        if not version:
+            return app.error('Select a procedure first.')
+        if not app.can_change(version['record']) or not app.connected():
+            return
+        procedure = self.selected_procedure
+        def done():
+            app.procedure_cache.pop(procedure['id'], None)
+            app.load_procedure(procedure['id'], self.loaded)
+        CorrectionDialog(app, version['record'], procedure['experiment_id'], version, done)
+
+    def history(self):
+        version = self.current_version()
+        if version:
+            HistoryDialog(self.app, version['record'])
 
 
 class ProcedureForm(Page):
@@ -1786,7 +2318,7 @@ class ExportPage(Page):
         lab = None if lab_name == ALL else ids.lab_key(lab_name)
         technique = None if technique_label == ALL else ids.TECHNIQUE_BY_LABEL[technique_label]
         words = search.casefold().split()
-        samples = [s for s in app.samples if (lab is None or s['lab'] == lab)
+        samples = [s for s in app.active_samples() if (lab is None or s['lab'] == lab)
             and all(w in f"{s['id']} {s['composition']} {s.get('origin', '')}".casefold() for w in words)]
         filters = self.filters()
         def done(built):
@@ -1945,10 +2477,13 @@ class SettingsPage(Page):
         ttk.Label(coordinator.body, text='Only needed once for the whole consortium. Creates the shared "CATALYST" project '
             'with its Samples and Procedures studies. Afterwards, share the project with each lab account in SciSure '
             '(collaborators with edit rights).', style='Hint.TLabel', wraplength=820, justify='left').pack(anchor='w', pady=(4, 8))
+        self.coordinator = tk.BooleanVar(value=self.app.settings.coordinator)
+        ttk.Checkbutton(coordinator.body, text='I am the CATALYST coordinator (lets me correct records from any lab)',
+            variable=self.coordinator, command=lambda: self.app.settings.set_coordinator(self.coordinator.get())).pack(anchor='w', pady=(0, 8))
         tools = ttk.Frame(coordinator.body)
         tools.pack(anchor='w')
         ttk.Button(tools, text='Set up CATALYST workspace', command=self.setup_workspace).pack(side='left')
-        ttk.Button(tools, text='Write readable copies for older records', command=self.write_readable).pack(side='left', padx=6)
+        ttk.Button(tools, text='Repair readable copies and the sample list', command=self.write_readable).pack(side='left', padx=6)
         about = Card(scroll.body, padding=18)
         about.pack(fill='x')
         ttk.Label(about.body, text=f'CATALYST desktop {__version__}', style='Sub.TLabel').pack(anchor='w')
@@ -2056,9 +2591,10 @@ class SettingsPage(Page):
         app = self.app
         if not app.connected():
             return
-        app.run('Adding readable copies in SciSure…', lambda progress: app.store.write_missing_readable(progress),
-            lambda r: app.info(f"Checked {r['checked']} samples and procedures: added {r['written']} readable cop"
-                f"{'y' if r['written'] == 1 else 'ies'}" + (f", {r['failed']} could not be written." if r['failed'] else '.')))
+        app.run('Checking readable copies and the sample list…', lambda progress: app.store.write_missing_readable(progress),
+            lambda r: (app.info(f"Checked {r['checked']} samples and procedures: made {r['written']} repair"
+                f"{'' if r['written'] == 1 else 's'}" + (f", {r['failed']} could not be made." if r['failed'] else '.')),
+                app.refresh()))
 
     def setup_workspace(self):
         app = self.app
@@ -2092,6 +2628,10 @@ class HelpPage(Page):
             'Only typed text and file locations are kept, not the files themselves.'),
         ('Procedures', 'A procedure is the shared master recipe. Improve it with "Save a new version"; samples always '
             'record which version they followed.'),
+        ('Fix a mistake', 'Open the sample → "Fix a mistake" to correct its details, or, if the ID itself is wrong, mark '
+            'it "Registered in error" and register it again. For data, select the record → "Fix" → correct it (replace '
+            'a wrong file) or withdraw it. Every correction needs a reason and earlier versions are kept. Your lab '
+            'corrects its own records; the coordinator can correct any.'),
         ('For AI and analysis', 'Export & AI access → Export a dataset, or connect an AI assistant with the read-only '
             'connector (docs/ai-access.md).'),
         ('Install on another computer', 'Settings → "Copy download link for a colleague", or send '

@@ -1,4 +1,4 @@
-# CATALYST 1.0 — researcher guide
+# CATALYST — researcher guide
 
 CATALYST is the front door to the consortium's SciSure database. You never need to open SciSure itself.
 
@@ -89,6 +89,23 @@ For example, reduced, spent, pelletized or scaled up: open it and click **New sa
 ## Looking at records in SciSure
 
 You don't need SciSure itself, but if you do open it, each record appears as a readable table (recipe, conditions, who, when) above its files. Make changes in CATALYST, not in SciSure: edits to that table are not read back.
+
+## Fixing a mistake
+
+Records can be corrected after they are saved. Every correction needs a short reason, and earlier versions are kept, so nothing is ever lost. You can correct records your lab saved. The coordinator can correct any record.
+
+**A sample's details** (composition, recipe, amount, notes, supplier details, files): open the sample → **Fix a mistake → Correct this sample's details…** → change what was wrong → write what was wrong → **Preview & save**.
+
+**The ID itself is wrong** (wrong date, wrong initials, or the sample was entered twice): the ID can't be edited, because it may already be written on vials. Open the sample → **Fix a mistake → Registered in error…**. Pick the correct sample if it already exists, or register it again afterwards. The wrong ID is hidden from the sample list and exports, it points to the correct sample, and its number is never reused. To see these samples, tick **Show samples registered in error** under the sample list.
+
+**A data record:** select it on the sample page → **Fix ▾**:
+
+- **Correct this record…** fixes the date, conditions or notes. To replace a file, tick **Wrong or replaced** next to the old file and add the right one. The old file stays in SciSure, marked as superseded, but is no longer offered as the data.
+- **Withdraw this record…** is for data that shouldn't be used, such as a failed run or data on the wrong sample. It's hidden from the sample page and exports but kept in SciSure with your reason. **Show withdrawn** under the list shows it again.
+
+**A procedure:** **Procedures → Correct this version…** fixes the description, written steps or documents. To change the recipe itself, use **Save a new version**.
+
+**History of corrections** (in either Fix menu, or on the Procedures page) shows who changed what, when and why. Only the coordinator can restore a withdrawn record or a retired sample.
 
 ## Drafts
 

@@ -170,6 +170,68 @@ def main():
         result = export_dataset(store, app.samples, out, originals=True)
         assert result['samples'] == 9 and result['data'] == 4 and result['files'] == 4, result
         assert len(list(out.iterdir())) == 2  # the preview-based export and the direct one
+        # Corrections after publishing: fix a sample, replace a data file, withdraw data, retire a sample.
+        previews = []
+        real_preview = appmod.PreviewDialog
+        def auto_preview(app_, title, id_text, lines, files, problems, save):
+            previews.append(dict(lines=dict(lines), problems=problems))
+            if not problems: save()
+        appmod.PreviewDialog = auto_preview
+        try:
+            first = next(s for s in app.samples if s['id'].endswith('260922-01'))
+            app.open_sample(first['id'])
+            c = app.current
+            fix = appmod.CorrectionDialog(app, c['record'], first['experiment_id'], c['sample_item'],
+                lambda: app.refresh(then=lambda: app.open_sample(first['experiment_id'])))
+            root.update(); snap(root, '9-correct-sample')
+            fix.preview()
+            assert 'Nothing has been changed yet.' in previews[-1]['problems'] and any('why' in p for p in previews[-1]['problems'])
+            fix.recipe.widgets['components'].set([dict(component='Mo', loading=12.0, unit='wt%'), dict(component='K', loading=1.0, unit='wt%')])
+            fix.recipe_changed()
+            assert fix.composition.get() == '12 wt% Mo + 1 wt% K on γ-Al2O3', fix.composition.get()
+            appmod.set_text(fix.reason, 'Loading was 12 wt%, not 10.')
+            fix.preview()
+            assert previews[-1]['problems'] == [] and previews[-1]['lines']['What changes'] == \
+                'Composition, Active metals / phases and loadings', previews[-1]
+            assert app.current['record']['revision'] == 2 and app.current['record']['composition'].startswith('12 wt% Mo')
+            assert app.find_sample(first['id'])['composition'].startswith('12 wt% Mo')  # the list shows the correction
+            page = app.pages['sample']
+            assert page.title.cget('text') == first['id']
+            # Another lab's record can't be corrected unless you are the coordinator.
+            xas = next(d for d in app.current['data'] if d['technique'] == 'XAS')
+            assert not app.can_change(xas['record'], quiet=True)
+            settings.set_coordinator(True)
+            assert app.can_change(xas['record'], quiet=True)
+            settings.set_coordinator(False)
+            xrd = next(d for d in app.current['data'] if d['technique'] == 'XRD')
+            page.data_view.selection_set(str(xrd['section_id'])); root.update()
+            fix = appmod.CorrectionDialog(app, xrd['record'], first['experiment_id'], xrd, page.reload)
+            fix.supersede['xrd-run.csv'].set(True)
+            fix.files.items = [FileItem(name='xrd-run.csv', content=b'x,y\n1,3\n')]; fix.files.render()
+            appmod.set_text(fix.reason, 'Uploaded the wrong scan.')
+            fix.preview()
+            assert previews[-1]['problems'] == [], previews[-1]
+            xrd = next(d for d in app.current['data'] if d['technique'] == 'XRD')
+            assert [f['name'] for f in xrd['record']['files']] == ['xrd-run (r2).csv'], xrd['record']['files']
+            rxn = next(d for d in app.current['data'] if d['technique'] == 'RXN')
+            page.data_view.selection_set(str(rxn['section_id'])); root.update()
+            page.withdraw_data()
+            reason = next(w for w in root.winfo_children() if isinstance(w, appmod.ReasonDialog))
+            appmod.set_text(reason.reason, 'Thermocouple failed during the run.'); reason.ok()
+            assert [d['technique'] for d in app.current['data']] == ['XRD', 'XAS'] and len(app.current['withdrawn']) == 1
+            page.show_withdrawn.set(True); page.shown(); snap(root, '9b-sample-corrected')
+            assert len(page.data_view.get_children()) == 3
+            appmod.HistoryDialog(app, app.current['record']).destroy()
+            count = len(app.active_samples())
+            page.retire_sample()
+            reason = next(w for w in root.winfo_children() if isinstance(w, appmod.ReasonDialog))
+            appmod.set_text(reason.reason, 'Entered twice.'); reason.ok()
+            assert app.page == 'samples' and len(app.active_samples()) == count - 1
+            assert first['id'] not in [app.pages['samples'].view.set(i, 'id') for i in app.pages['samples'].view.get_children()]
+            app.pages['samples'].show_retired.set(True); app.pages['samples'].render()
+            assert any('registered in error' in app.pages['samples'].view.set(i, 'id') for i in app.pages['samples'].view.get_children())
+        finally:
+            appmod.PreviewDialog = real_preview
         app.show('settings'); snap(root, '8-settings')
         root.destroy()
     print('Redesigned interface: all screens and the save/export flows work with synthetic data.')

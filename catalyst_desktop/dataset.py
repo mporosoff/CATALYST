@@ -59,7 +59,8 @@ def sample_row(entry):
         notebook_label=r.get('label', ''), procedure_id=proc.get('id', ''), procedure_version=proc.get('version'),
         procedure_name=proc.get('name', ''), supplier=commercial.get('supplier', ''), product=commercial.get('product', ''),
         catalog_number=commercial.get('catalog_number', ''), lot=commercial.get('lot', ''), form=commercial.get('form', ''),
-        parent_sample_id=r.get('parent_id') or '', amount_g=r.get('amount_g', r.get('amount_made_g')))
+        parent_sample_id=r.get('parent_id') or '', amount_g=r.get('amount_g', r.get('amount_made_g')),
+        status=records.status_of(r) if r else '', revision=records.revision_of(r), last_corrected=str(r.get('revised_at') or '')[:10])
     row.update(recipe_columns(r.get('recipe')))
     row['deviations_from_procedure'] = '; '.join(f"{d['label']}: {records.format_value(d['field'], d['procedure'])} -> "
         f"{records.format_value(d['field'], d['sample'])}" for d in r.get('deviations', []))
@@ -85,7 +86,8 @@ def data_rows(entry, condition_keys):
         for key in condition_keys:
             row['cond_' + key] = r.get('conditions', {}).get(key, '')
         row.update(pooled_with=', '.join(r.get('pooled_with', [])), notes=r.get('notes', ''),
-            files='; '.join(f['name'] for f in r.get('files', [])))
+            files='; '.join(f['name'] for f in r.get('files', [])), revision=records.revision_of(r),
+            last_corrected=str(r.get('revised_at') or '')[:10])
         for key in SAMPLE_KEYS_IN_DATA:
             row['sample_' + key] = base[key]
         row.update({'sample_' + k: v for k, v in base.items() if k.startswith('recipe_')})

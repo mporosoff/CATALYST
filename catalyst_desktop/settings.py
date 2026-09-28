@@ -16,7 +16,7 @@ import tempfile
 FORMAT = 'catalyst-settings/1'
 MAX_RECENT = 15
 DEFAULTS = dict(format=FORMAT, profile={}, server='https://sandbox.elabjournal.com', remember_token=True,
-    recent_samples=[], drafts={})
+    recent_samples=[], drafts={}, coordinator=False)
 
 
 def settings_dir():
@@ -75,6 +75,15 @@ class Settings:
     @property
     def server(self):
         return self.data['server']
+
+    @property
+    def coordinator(self):
+        """This person is the CATALYST coordinator (may correct any lab's records). A guard against accidents."""
+        return bool(self.data.get('coordinator'))
+
+    def set_coordinator(self, value):
+        self.data['coordinator'] = bool(value)
+        self.save()
 
     def set_server(self, server, remember_token):
         self.data['server'], self.data['remember_token'] = server, bool(remember_token)
