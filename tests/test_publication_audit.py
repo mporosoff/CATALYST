@@ -203,7 +203,7 @@ class ConfigurationEnvelopeAuditTests(unittest.TestCase):
 
     def test_malformed_controlled_options_are_conflicts_not_type_errors(self):
         ready = SchemaInstaller(self.client, 7).apply(plan_configuration(self.client, 7))
-        field = next(f for f in self.api.metas[ready['sample_type_id']] if f['key'] == 'origin_lab')
+        field = next(f for f in self.api.metas[ready['sample_type_id']] if f['key'] == 'sample_created_lab')
         for malformed in ([{}], 'Rochester', ['Rochester', 'Rochester']):
             with self.subTest(malformed=malformed):
                 field['optionValues'] = malformed

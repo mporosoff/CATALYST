@@ -11,7 +11,15 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 from . import __version__
-from .design import apply_theme, Card, page_heading, section_navigation, icon, PAPER, INK, MUTED, GREEN, SIDEBAR, LINE
+from .design import apply_theme, Card, Tooltip, page_heading, section_navigation, icon, PAPER, INK, MUTED, GREEN, SIDEBAR, LINE
+from .guidance import field_help, required_context_keys
+from .help import HelpPane
+from .workflow_gui import WorkflowUI
+from .runs_gui import RunUI
+from .sample_workspace import SampleWorkspace
+from .issues_gui import IssueUI
+from .sample_documents_gui import SampleDocumentsUI
+from .library import search_procedures, search_samples
 from .model import (Source, Revision, InputError, MODALITIES, COMMON_CONTEXT, MODALITY_CONTEXT,
     FIELDS, build_preview, make_profile, table, check_sources, load_sources)
 from .scisure import SciSureClient, SciSureError, SANDBOX, remote_id, tenant_origin
@@ -59,9 +67,10 @@ class Disclosure(ttk.Frame):
         else: self.body.pack_forget()
 
 
-class Application:
-    def __init__(self, root, smoke=False):
+class Application(IssueUI, SampleDocumentsUI, WorkflowUI, SampleWorkspace, RunUI):
+    def __init__(self, root, smoke=False, legacy=False):
         self.root = root
+        self.adaptive = not legacy
         self.smoke = smoke
         self.executor = ThreadPoolExecutor(max_workers=1)
         self.messages = queue.Queue()
@@ -107,9 +116,10 @@ class Application:
         ttk.Label(self.sidebar, text='WORKSPACE', style='SideCaption.TLabel').pack(anchor='w', padx=12, pady=(0, 10))
         self.main = ttk.Frame(root, style='Page.TFrame')
         self.main.pack(side='left', fill='both', expand=True)
-        toolbar = ttk.Frame(self.main, padding=(30, 18), style='Page.TFrame')
+        toolbar = ttk.Frame(self.main, padding=(30, 12), style='Page.TFrame')
         toolbar.pack(fill='x')
-        ttk.Label(toolbar, text='SIX LABORATORIES  /  ONE SHARED WORKSPACE', style='Eyebrow.TLabel').pack(side='left')
+        self.help_window = None
+        ttk.Button(toolbar, text='Help · upload & access', command=self.show_help).pack(side='left')
         self.connection_badge = tk.StringVar(value='○  SciSure · Offline')
         ttk.Label(toolbar, textvariable=self.connection_badge, style='Badge.TLabel').pack(side='right')
         ttk.Separator(self.main).pack(fill='x')
@@ -120,11 +130,12 @@ class Application:
         self.review_tab = ttk.Frame(self.tabs, padding=(30, 26), style='Page.TFrame')
         self.history_tab = ttk.Frame(self.tabs, padding=(30, 26), style='Page.TFrame')
         self.catalog_tab = ttk.Frame(self.tabs, padding=(30, 26), style='Page.TFrame')
+        self.batch_tab = ttk.Frame(self.tabs, padding=(20, 18), style='Page.TFrame')
         self.navigation_buttons = {}
         self.nav_images = []
-        for frame, label, graphic in [(self.import_tab, 'New submission', 'upload'), (self.review_tab, 'Review', 'review'),
-                (self.history_tab, 'Saved records', 'library'), (self.catalog_tab, 'Samples & models', 'samples'),
-                (self.connection_tab, 'SciSure connection', 'connection')]:
+        for frame, label, graphic in [(self.catalog_tab, 'Samples & data', 'samples'), (self.import_tab, 'Add data', 'upload'), (self.review_tab, 'Review', 'review'),
+                (self.history_tab, 'Saved records', 'library'),
+                (self.batch_tab, 'Batch review', 'review'), (self.connection_tab, 'SciSure connection', 'connection')]:
             self.tabs.add(frame, text=label)
             photo = icon(root, graphic, '#BCD1BF', 20)
             self.nav_images.append(photo)
@@ -148,6 +159,8 @@ class Application:
         self.build_review()
         self.build_history()
         self.build_catalog()
+        self.build_batch_page()
+        if self.adaptive: self.tabs.select(self.catalog_tab)
         self.connection_status.trace_add('write', lambda *_: self.connection_badge.set('●  SciSure · Connected' if self.connection_status.get().startswith('Connected') else '○  SciSure · Offline'))
         self._scroll_tag = 'CatalystWheel' + str(id(self))
         for event in ('<MouseWheel>', '<Button-4>', '<Button-5>'):
@@ -161,7 +174,7 @@ class Application:
         self.root.after(100, self.poll)
 
     def callback_error(self, *_):
-        messagebox.showerror('CATALYST', 'This action could not be completed. Your in-memory review is retained.', parent=self.root)
+        self.show_action_error('This action could not be completed. Your in-memory review is retained.')
 
     def install_wheel_handlers(self, widget=None):
         if not hasattr(self, '_scroll_tag'): return
@@ -194,6 +207,25 @@ class Application:
         webbrowser.open(RELEASES_URL)
         self.status.set('Opened the GitHub downloads page. Close CATALYST before replacing its application file; your saved OS credential remains available.')
 
+    def show_help(self):
+        if self.help_window is not None and self.help_window.winfo_exists():
+            self.help_window.deiconify()
+            self.help_window.lift()
+            return
+        window = self.help_window = tk.Toplevel(self.root)
+        window.title('CATALYST · Upload & access guide')
+        window.geometry('660x350')
+        window.minsize(600, 340)
+        window.protocol('WM_DELETE_WINDOW', window.withdraw)
+        self.help_pane = HelpPane(window, self.help_navigate)
+        self.help_pane.pack(fill='both', expand=True)
+        self.help_pane.show_guide('access' if self.tabs.select() == str(self.history_tab) else 'upload')
+
+    def help_navigate(self, page):
+        pages = {'submission': self.import_tab, 'review': self.review_tab,
+            'connection': self.connection_tab, 'records': self.history_tab, 'catalog': self.catalog_tab, 'batch': self.batch_tab}
+        self.tabs.select(pages[page])
+
     def invalidate(self, *_):
         self.dirty = True
         self.approval = None
@@ -205,11 +237,19 @@ class Application:
         var.trace_add('write', self.invalidate)
         return var
 
-    def label_entry(self, parent, row, label, variable, width=30, show=None):
-        ttk.Label(parent, text=label).grid(row=row, column=0, sticky='w', pady=5, padx=(0, 12))
+    def explain(self, widget, key):
+        Tooltip(widget, lambda: field_help(key, self.modality.get() if hasattr(self, 'modality') else 'reactor'))
+        return widget
+
+    def label_entry(self, parent, row, label, variable, width=30, show=None, help_key=None):
+        caption = ttk.Label(parent, text=label, wraplength=220)
+        caption.grid(row=row, column=0, sticky='w', pady=5, padx=(0, 12))
         widget = ttk.Entry(parent, textvariable=variable, width=width, show=show or '')
         widget.grid(row=row, column=1, sticky='ew', pady=5)
         parent.columnconfigure(1, weight=1)
+        if help_key:
+            self.explain(caption, help_key)
+            self.explain(widget, help_key)
         return widget
 
     def run(self, description, work, done, failed=None):
@@ -218,13 +258,18 @@ class Application:
             return
         self.busy = True
         self.locked_widgets = []
+        self.locked_text_widgets = []
         def lock(parent):
             for child in parent.winfo_children():
                 if isinstance(child, (ttk.Entry, ttk.Combobox, ttk.Checkbutton, ttk.Button, ttk.Menubutton)):
                     self.locked_widgets.append((child, child.state()))
                     child.state(['disabled'])
+                elif isinstance(child, tk.Text):
+                    self.locked_text_widgets.append((child, child.cget('state')))
+                    child.configure(state='disabled')
                 lock(child)
         lock(self.root)
+        if hasattr(self, 'batch_panel'): self.batch_panel.set_busy(True)
         self.status.set(description)
         self.root.configure(cursor='watch')
         future = self.executor.submit(work)
@@ -244,6 +289,10 @@ class Application:
                         widget.state(['!disabled', '!readonly'])
                         widget.state(state)
                 self.locked_widgets = []
+                for widget, state in self.locked_text_widgets:
+                    if widget.winfo_exists(): widget.configure(state=state)
+                self.locked_text_widgets = []
+                if hasattr(self, 'batch_panel'): self.batch_panel.set_busy(False)
                 self.root.configure(cursor='')
                 try:
                     result = future.result()
@@ -251,11 +300,11 @@ class Application:
                 except (InputError, SciSureError, CredentialError) as e:
                     if failed: failed()
                     self.status.set(str(e))
-                    messagebox.showerror('CATALYST — action paused', str(e), parent=self.root)
+                    self.show_action_error(str(e))
                 except Exception:
                     if failed: failed()
                     self.status.set('The operation could not be completed. Your review remains in memory.')
-                    messagebox.showerror('CATALYST', 'The operation could not be completed. No raw error or credential was logged.', parent=self.root)
+                    self.show_action_error('The operation could not be completed. Your review remains in memory.')
         except queue.Empty:
             pass
         self.root.after(100, self.poll)
@@ -272,11 +321,11 @@ class Application:
         fields.pack(fill='x', pady=12)
         self.tenant = tk.StringVar(value=SANDBOX)
         self.token = tk.StringVar()
-        self.label_entry(fields, 0, 'SciSure server URL', self.tenant)
+        self.label_entry(fields, 0, '* SciSure server URL', self.tenant, help_key='tenant')
         self.tenant.trace_add('write', self.server_changed)
-        self.label_entry(fields, 1, 'API token', self.token, show='•')
+        self.label_entry(fields, 1, '* API token', self.token, show='•', help_key='token')
         self.remember = tk.BooleanVar(value=False)
-        ttk.Checkbutton(p, text='Remember in this computer’s operating system credential store', variable=self.remember).pack(anchor='w')
+        self.explain(ttk.Checkbutton(p, text='Remember in this computer’s operating system credential store', variable=self.remember), 'remember').pack(anchor='w')
         actions = ttk.Frame(p)
         actions.pack(fill='x', pady=12)
         ttk.Button(actions, text='Connect', style='Primary.TButton', command=self.connect).pack(side='left')
@@ -285,9 +334,13 @@ class Application:
         self.connection_status = tk.StringVar(value='Not connected. You can prepare a review offline.')
         ttk.Label(p, textvariable=self.connection_status, wraplength=530, style='Muted.TLabel').pack(anchor='w', pady=12)
         ttk.Separator(p).pack(fill='x', pady=12)
-        ttk.Label(p, text='Publication destination', style='Sub.TLabel').pack(anchor='w')
-        ttk.Label(p, text='Choose the experiment that will receive approved files.', style='Muted.TLabel').pack(anchor='w', pady=(5, 0))
-        self.experiment = ttk.Combobox(p, state='readonly', width=90)
+        ttk.Label(p, text='Run / experiment', style='Sub.TLabel').pack(anchor='w')
+        ttk.Label(p, text='Choose an existing run or create one for this work.', style='Muted.TLabel').pack(anchor='w', pady=(5, 0))
+        run_actions = ttk.Frame(p)
+        run_actions.pack(fill='x', pady=(10, 0))
+        ttk.Button(run_actions, text='Find existing run…', command=lambda: self.open_run_picker('existing')).pack(side='left')
+        ttk.Button(run_actions, text='New run…', command=lambda: self.open_run_picker('new')).pack(side='left', padx=10)
+        self.experiment = self.explain(ttk.Combobox(p, state='readonly', width=90), 'experiment')
         self.experiment.pack(fill='x', pady=10)
         self.experiment.bind('<<ComboboxSelected>>', lambda _: self.clear_destination())
         ttk.Button(p, text='Verify selected destination', command=self.verify_destination).pack(anchor='w')
@@ -301,8 +354,8 @@ class Application:
         native_fields.pack(fill='x')
         self.inspect_sample = tk.StringVar()
         self.inspect_protocol = tk.StringVar()
-        self.label_entry(native_fields, 0, 'Existing SciSure sample ID (optional check)', self.inspect_sample)
-        self.label_entry(native_fields, 1, 'SciSure protocol version ID (optional check)', self.inspect_protocol)
+        self.label_entry(native_fields, 0, 'Existing SciSure sample ID (optional check)', self.inspect_sample, help_key='inspect_sample')
+        self.label_entry(native_fields, 1, 'SciSure protocol version ID (optional check)', self.inspect_protocol, help_key='inspect_protocol')
         ttk.Button(p, text='Inspect native SciSure setup (read only)', command=self.inspect_integration).pack(anchor='w', pady=5)
         ttk.Button(p, text='Prepare CATALYST material configuration', command=self.prepare_configuration).pack(anchor='w', pady=5)
 
@@ -351,7 +404,7 @@ class Application:
             sid = remote_id(self.inspect_sample.get()) if self.inspect_sample.get().strip() else None
             pid = remote_id(self.inspect_protocol.get()) if self.inspect_protocol.get().strip() else None
         except SciSureError as e:
-            messagebox.showerror('CATALYST', str(e), parent=self.root)
+            self.show_action_error(str(e), target='connection')
             return
         index = self.experiment.current()
         eid = self.experiments[index]['experimentID'] if 0 <= index < len(self.experiments) else None
@@ -371,6 +424,7 @@ class Application:
 
     def server_changed(self, *_):
         # Never carry a loaded credential or a verified destination to another host.
+        self.reset_run_browser()
         self.token.set('')
         self.client = None
         self.group_id = None
@@ -384,6 +438,7 @@ class Application:
     def connect(self):
         if self.busy:
             return
+        self.reset_run_browser()
         token = self.token.get()
         origin = self.tenant.get()
         remember = self.remember.get()
@@ -410,6 +465,7 @@ class Application:
             self.token.set('')
             self.connection_status.set(f'Connected to {self.client.origin} · {connection["group_name"]} (group {self.group_id}). {len(self.experiments)} experiments available.')
             self.status.set(warning or 'Connection verified. Select an experiment and verify it before sending data.')
+            if self.adaptive: self.refresh_catalog()
         self.run('Checking the SciSure connection…', work, done,
             lambda: self.connection_status.set('Connection not verified. Check the token and connection, then try again.'))
 
@@ -426,6 +482,7 @@ class Application:
     def forget(self):
         if self.busy:
             return
+        self.reset_run_browser()
         origin = self.tenant.get()
         self.token.set('')
         self.client = None
@@ -447,6 +504,9 @@ class Application:
         self.history_destination = self.files_destination = None
         self.catalog = None
         self.catalog_rows = []
+        if self.adaptive and hasattr(self, 'link_rows'):
+            self.native_procedures = []
+            self.refresh_link_options()
         if hasattr(self, 'catalog_table'):
             self.catalog_table.delete(*self.catalog_table.get_children())
         if hasattr(self, 'history_table'):
@@ -474,17 +534,14 @@ class Application:
             return
         client, eid, gid = self.client, self.experiments[index]['experimentID'], self.group_id
         def done(destination):
-            self.destination = destination
-            key = (destination['tenant'], gid, eid)
-            self.publisher = Publisher(client, destination, self.transfer_operations.setdefault(key, {}))
-            self.destination_status.set(f'Verified: {destination["experiment_name"]} · experiment {eid} · group {gid}')
-            self.status.set('Destination verified. Sending still requires an approved revision and a transfer confirmation.')
+            self.accept_run_destination(destination)
         self.run('Verifying the destination…', lambda: client.destination(eid, gid), done)
 
     def build_import(self):
         p = self.import_tab.body
-        page_heading(p, 'New submission', 'Bring your files together. Keep the full story of your sample.', 'PREPARE  /  REVIEW  /  SHARE')
-        originals = Card(p)
+        page_heading(p, 'Add data', 'Choose a record type, link your samples and methods, then review and send.', '1  PREPARE  /  2  REVIEW  /  3  SEND')
+        self.build_workflow_start(p)
+        originals = self.originals_card = Card(p)
         originals.pack(fill='x', pady=(0, 18))
         body = originals.body
         top = ttk.Frame(body)
@@ -495,7 +552,7 @@ class Application:
         copy.pack(side='left', fill='x', expand=True)
         ttk.Label(copy, text='Start with your original files', style='Sub.TLabel').pack(anchor='w')
         ttk.Label(copy, text='Tables, instrument exports, images and more.', style='Muted.TLabel').pack(anchor='w', pady=(5, 0))
-        ttk.Button(top, text='Choose files', style='Primary.TButton', command=self.choose_files).pack(side='right', padx=(12, 0))
+        self.explain(ttk.Button(top, text='Choose files', style='Primary.TButton', command=self.choose_files), 'files').pack(side='right', padx=(12, 0))
         ttk.Label(body, text='CSV  ·  XLSX  ·  JSON  ·  IMAGES  ·  NATIVE FILES', style='Small.TLabel').pack(anchor='w', pady=(18, 0))
         self.file_list = ttk.Frame(body)
         self.file_list.pack(fill='x')
@@ -503,69 +560,94 @@ class Application:
         options = ttk.Frame(body)
         options.pack(fill='x', pady=(14, 0))
         ttk.Label(options, textvariable=self.file_summary, style='Small.TLabel').pack(side='left')
-        ttk.Button(options, text='+ Supporting files', command=self.add_supporting_files).pack(side='right')
+        self.explain(ttk.Button(options, text='+ Supporting files', command=self.add_supporting_files), 'supporting_files').pack(side='right')
         details = Card(p)
         details.pack(fill='x', pady=(0, 18))
         body = details.body
-        ttk.Label(body, text='Submission details', style='Sub.TLabel').pack(anchor='w', pady=(0, 16))
+        ttk.Label(body, text='Required information', style='Sub.TLabel').pack(anchor='w')
+        ttk.Label(body, text='* Required for this submission. Hover over a label or field for its meaning and purpose.\nKeyboard: focus a field to see its explanation; Escape dismisses it.',
+            style='Muted.TLabel', wraplength=540).pack(anchor='w', pady=(6, 12))
+        self.required_summary = tk.StringVar()
+        ttk.Label(body, textvariable=self.required_summary, style='Badge.TLabel', wraplength=520).pack(fill='x')
+        ttk.Button(body, text='Go to next missing field', command=self.focus_missing).pack(anchor='w', pady=(8, 16))
+        self.submission_widgets = {}
         self.title = self.watched()
         self.entity = self.watched('Rochester')
-        self.modality = self.watched('reactor')
-        ttk.Label(body, text='Submission title', style='Muted.TLabel').pack(anchor='w', pady=(0, 6))
-        ttk.Entry(body, textvariable=self.title).pack(fill='x', pady=(0, 16))
-        selectors = ttk.Frame(body)
+        self.modality = self.watched('XRD' if self.adaptive else 'reactor')
+        self.title_frame = ttk.Frame(body)
+        self.title_frame.pack(fill='x')
+        self.explain(ttk.Label(self.title_frame, text='Submission title · filled from file name', style='Muted.TLabel'), 'title').pack(anchor='w', pady=(0, 6))
+        self.submission_widgets['title'] = self.explain(ttk.Entry(self.title_frame, textvariable=self.title), 'title')
+        self.submission_widgets['title'].pack(fill='x', pady=(0, 16))
+        selectors = self.selectors_frame = ttk.Frame(body)
         selectors.pack(fill='x')
         selectors.columnconfigure(0, weight=1, uniform='selector')
         selectors.columnconfigure(1, weight=1, uniform='selector')
-        ttk.Label(selectors, text='Source laboratory', style='Muted.TLabel').grid(row=0, column=0, sticky='w', pady=(0, 6))
-        ttk.Combobox(selectors, textvariable=self.entity, values=LAB_CHOICES, state='readonly', width=20).grid(row=1, column=0, sticky='ew', padx=(0, 16))
-        ttk.Label(selectors, text='Data type', style='Muted.TLabel').grid(row=0, column=1, sticky='w', pady=(0, 6))
-        combo = ttk.Combobox(selectors, textvariable=self.modality, values=MODALITIES, state='readonly', width=20)
+        self.explain(ttk.Label(selectors, text='* Source laboratory', style='Muted.TLabel'), 'entity').grid(row=0, column=0, sticky='w', pady=(0, 6))
+        self.submission_widgets['entity'] = self.explain(ttk.Combobox(selectors, textvariable=self.entity, values=LAB_CHOICES, state='readonly', width=20), 'entity')
+        self.submission_widgets['entity'].grid(row=1, column=0, sticky='ew', padx=(0, 16))
+        self.submission_widgets['entity'].bind('<<ComboboxSelected>>', lambda _: self.workflow_lab_changed())
+        self.modality_label = self.explain(ttk.Label(selectors, text='* Data type', style='Muted.TLabel'), 'modality')
+        self.modality_label.grid(row=0, column=1, sticky='w', pady=(0, 6))
+        combo = self.submission_widgets['modality'] = self.explain(ttk.Combobox(selectors, textvariable=self.modality, values=[m for m in MODALITIES if m not in ('sample', 'procedure')], state='readonly', width=20), 'modality')
         combo.grid(row=1, column=1, sticky='ew')
-        combo.bind('<<ComboboxSelected>>', lambda _: self.rebuild_context())
+        combo.bind('<<ComboboxSelected>>', lambda _: self.workflow_modality_changed() if self.adaptive else self.rebuild_context())
         self.toolkit = tk.BooleanVar(value=False)
         self.toolkit.trace_add('write', self.invalidate)
-        self.raw_only = tk.BooleanVar(value=False)
+        self.raw_only = tk.BooleanVar(value=self.adaptive)
         self.raw_only.trace_add('write', self.invalidate)
-        ttk.Checkbutton(body, text='Use the Rochester GC toolkit mapping', variable=self.toolkit).pack(anchor='w', pady=(12, 0))
-        ttk.Checkbutton(body, text='Keep originals with context only · no table conversion', variable=self.raw_only).pack(anchor='w')
-        self.context_section = Disclosure(p, '01   Sample & scientific context')
-        self.context_section.pack(fill='x', pady=(0, 12))
-        body = self.context_section.body
-        ttk.Label(body, text='Identify the material, method and lab behind this submission. Reuse an existing identity from Samples & models.', style='Muted.TLabel', wraplength=570).pack(anchor='w', pady=(0, 16))
+        self.toolkit_widget = self.explain(ttk.Checkbutton(body, text='Use the Rochester GC toolkit mapping', variable=self.toolkit, command=self.prepare_table_sources), 'toolkit')
+        self.toolkit_widget.pack(anchor='w', pady=(12, 0))
+        self.raw_only_widget = self.explain(ttk.Checkbutton(body, text='Preserve original files · uncheck to convert a table', variable=self.raw_only, command=self.prepare_table_sources), 'raw_only')
+        self.raw_only_widget.pack(anchor='w')
+        self.context_separator = ttk.Separator(body)
+        self.context_separator.pack(fill='x', pady=16)
+        self.context_heading = ttk.Label(body, text='Sample & scientific context', style='Sub.TLabel')
+        self.context_heading.pack(anchor='w')
+        self.context_intro = ttk.Label(body, text='Use an existing sample to reuse its synthesis details, or create IDs for new material.', style='Muted.TLabel', wraplength=530)
+        self.context_intro.pack(anchor='w', pady=(5, 10))
         identity_actions = ttk.Frame(body)
         identity_actions.pack(fill='x', pady=(0, 12))
-        ttk.Button(identity_actions, text='New batch + sample IDs', command=lambda: self.generate_identity('batch')).pack(side='left')
-        ttk.Button(identity_actions, text='New model ID', command=lambda: self.generate_identity('model')).pack(side='left', padx=6)
-        ttk.Button(identity_actions, text='New dataset ID', command=self.generate_dataset_id).pack(side='left')
+        self.new_identity_button = ttk.Button(identity_actions, text='New batch + sample IDs', command=lambda: self.generate_identity('model' if self.modality.get() == 'computational' else 'batch'))
+        self.new_identity_button.grid(row=0, column=0, sticky='w', padx=(0, 6), pady=3)
+        ttk.Button(identity_actions, text='Use existing sample / model', command=lambda: self.tabs.select(self.catalog_tab)).grid(row=0, column=1, sticky='w', pady=3)
+        self.explain(ttk.Button(identity_actions, text='New dataset ID', command=self.generate_dataset_id), 'datasetId').grid(row=1, column=0, sticky='w', pady=3)
         self.context_frame = ttk.Frame(body)
         self.context_frame.pack(fill='x')
         self.rebuild_context()
-        self.mapping_section = Disclosure(p, '02   Column mapping & versions')
+        self.mapping_section = ttk.Frame(body)
         self.mapping_section.pack(fill='x', pady=(0, 12))
-        p = self.mapping_section.body
-        ttk.Label(p, text='For ordinary tables, choose a header row and explicit units. Toolkit bundles use their dedicated versioned mapping.', wraplength=950).pack(anchor='w', pady=5)
+        p = self.mapping_section
+        ttk.Separator(p).pack(fill='x', pady=16)
+        ttk.Label(p, text='Column mapping & versions', style='Sub.TLabel').pack(anchor='w')
+        ttk.Label(p, text='Required for table conversion. Read columns, then choose the meaning and original unit of each column you want to convert. Leave other columns as Ignore.', style='Muted.TLabel', wraplength=530).pack(anchor='w', pady=(5, 12))
         mapping_form = ttk.Frame(p)
         mapping_form.pack(fill='x')
-        self.source_choice = ttk.Combobox(mapping_form, state='readonly')
+        self.source_choice = self.explain(ttk.Combobox(mapping_form, state='readonly'), 'source_choice')
         self.source_choice.grid(row=0, column=1, sticky='ew', pady=4)
-        ttk.Label(mapping_form, text='Table source file').grid(row=0, column=0, sticky='w')
+        self.explain(ttk.Label(mapping_form, text='* Table source file'), 'source_choice').grid(row=0, column=0, sticky='w')
         self.source_choice.bind('<<ComboboxSelected>>', lambda _: self.source_changed())
-        self.sheet_choice = ttk.Combobox(mapping_form, state='readonly')
+        self.sheet_choice = self.explain(ttk.Combobox(mapping_form, state='readonly'), 'sheet_choice')
         self.sheet_choice.grid(row=1, column=1, sticky='ew', pady=4)
-        ttk.Label(mapping_form, text='Worksheet').grid(row=1, column=0, sticky='w')
+        self.explain(ttk.Label(mapping_form, text='* Worksheet'), 'sheet_choice').grid(row=1, column=0, sticky='w')
         self.sheet_choice.bind('<<ComboboxSelected>>', lambda _: self.invalidate())
         self.header_row = self.watched('1')
         self.profile_name = self.watched('Partner table mapping')
         self.profile_version = self.watched('1')
         self.source_version = self.watched()
-        self.label_entry(mapping_form, 2, 'Header row', self.header_row)
-        self.label_entry(mapping_form, 3, 'Source format / export version', self.source_version)
-        self.label_entry(mapping_form, 4, 'Mapping profile name', self.profile_name)
-        self.label_entry(mapping_form, 5, 'Mapping profile version', self.profile_version)
-        ttk.Button(p, text='Read columns', command=self.read_columns).pack(anchor='w', pady=8)
+        self.mapping_widgets = {'source_choice': self.source_choice, 'sheet_choice': self.sheet_choice}
+        for row, key, label in [(2, 'header_row', 'Header row'), (3, 'source_version', 'Source format / export version'),
+                (4, 'profile_name', 'Mapping profile name'), (5, 'profile_version', 'Mapping profile version')]:
+            self.mapping_widgets[key] = self.label_entry(mapping_form, row, '* ' + label, getattr(self, key), help_key=key)
+        self.read_columns_button = ttk.Button(p, text='Read columns', command=self.read_columns)
+        self.read_columns_button.pack(anchor='w', pady=8)
         self.mapping_frame = ttk.Frame(p)
         self.mapping_frame.pack(fill='x')
+        self.mapping_note = ttk.Label(body, style='Muted.TLabel', wraplength=530)
+        for variable in (self.title, self.entity, self.header_row, self.source_version, self.profile_name, self.profile_version):
+            variable.trace_add('write', self.schedule_requirements)
+        self.toolkit.trace_add('write', lambda *_: self.mode_changed('toolkit'))
+        self.raw_only.trace_add('write', lambda *_: self.mode_changed('raw_only'))
         footer = ttk.Frame(self.import_tab, padding=(30, 16))
         footer.pack(side='bottom', fill='x', before=self.import_tab.canvas)
         ttk.Label(footer, text='DRAFT  ·  Not yet sent to SciSure', style='Small.TLabel').pack(side='left')
@@ -573,27 +655,38 @@ class Application:
         self.review_button = ttk.Button(footer, text='Review submission  →', style='Primary.TButton', command=self.preview)
         self.review_button.pack(side='right')
         self.review_button.state(['disabled'])
+        self.refresh_requirements()
 
     def rebuild_context(self):
+        if self.adaptive:
+            self._workflow_layout_ready = False
+            return self.rebuild_workflow_context()
         old = {k: v.get() for k, v in self.context_vars.items()}
         for child in self.context_frame.winfo_children():
             child.destroy()
         self.context_vars = {}
-        self.context_sections = ttk.Notebook(self.context_frame, style='Workspace.TNotebook')
-        self.context_sections.pack(fill='x', pady=(10, 0))
-        groups = {}
+        self.context_widgets = {}
+        self.context_fields = {}
+        self.context_labels = {}
+        self.context_groups = {}
+        self.required_keys = None
+        self.context_group_frames = {}
         for name in ('Sample & run', 'Measurement', 'Model & links' if self.modality.get() == 'computational' else 'Synthesis & lineage', 'Labs & handoff', 'Notes'):
-            frame = ttk.Frame(self.context_sections, padding=(12, 14))
-            self.context_sections.add(frame, text=name)
+            frame = ttk.Frame(self.context_frame)
             frame.columnconfigure(0, weight=1, uniform='field')
             frame.columnconfigure(1, weight=1, uniform='field')
-            groups[name] = [frame, 0]
-        section_navigation(self.context_frame, self.context_sections, [(frame, name) for name, (frame, _) in groups.items()]).pack(fill='x', before=self.context_sections)
+            ttk.Label(frame, text=name, style='Sub.TLabel').grid(row=0, column=0, columnspan=2, sticky='w', pady=(14, 12))
+            self.context_group_frames[name] = frame
+        self.optional_context = Disclosure(self.context_frame, 'Optional details · notes, links & handoff')
+        self.optional_context.body.columnconfigure(0, weight=1, uniform='optional')
+        self.optional_context.body.columnconfigure(1, weight=1, uniform='optional')
         labs = {'submittingLab', 'acquisitionLab', 'processingLab', 'originLab', 'sampleCreatedLab', 'modelCreatedLab', 'custodyFromLab'}
-        choices = {**{key: LAB_CHOICES for key in labs}, 'materialKind': MATERIAL_KINDS, 'modelRelation': MODEL_RELATIONS}
+        choices = {**{key: LAB_CHOICES for key in labs}, 'custodyFromLab': ('',) + LAB_CHOICES,
+            'materialKind': MATERIAL_KINDS, 'modelRelation': MODEL_RELATIONS}
         for row, (key, label) in enumerate((COMMON_CONTEXT | trace_context(self.modality.get()) | MODALITY_CONTEXT[self.modality.get()]).items()):
             default = self.entity.get() if key in labs - {'custodyFromLab'} else ''
             var = self.watched(old.get(key, default))
+            var.trace_add('write', self.schedule_requirements)
             self.context_vars[key] = var
             if key in ('processingVersion', 'identityNote'): group = 'Notes'
             elif key in ('submittingLab', 'acquisitionLab', 'processingLab', 'custodyFromLab', 'custodySampleId', 'custodyRecord', 'receivedAt'): group = 'Labs & handoff'
@@ -602,16 +695,127 @@ class Application:
             elif key in PHYSICAL_CONTEXT: group = 'Synthesis & lineage'
             elif key in COMPUTATIONAL_CONTEXT: group = 'Model & links'
             else: group = 'Sample & run'
-            parent, index = groups[group]
-            field = ttk.Frame(parent, padding=(0, 0, 12, 10))
-            field.grid(row=index // 2, column=index % 2, sticky='nsew')
-            groups[group][1] += 1
-            ttk.Label(field, text=label, wraplength=250, style='Muted.TLabel').pack(anchor='w', pady=(0, 5))
+            self.context_groups[key] = group
+            # Keep one widget per field when a condition makes it required. Moving its
+            # grid placement preserves text, keyboard focus and approval invalidation.
+            field = self.context_fields[key] = ttk.Frame(self.context_frame, padding=(0, 0, 12, 10))
+            caption = self.context_labels[key] = ttk.Label(field, wraplength=235, style='Muted.TLabel')
+            caption.pack(anchor='w', pady=(0, 5))
             if key in choices:
-                ttk.Combobox(field, textvariable=var, values=choices[key], state='readonly', width=22).pack(fill='x')
+                widget = ttk.Combobox(field, textvariable=var, values=choices[key], state='readonly', width=18)
             else:
-                ttk.Entry(field, textvariable=var, width=22).pack(fill='x')
+                widget = ttk.Entry(field, textvariable=var, width=18)
+            widget.pack(side='bottom', fill='x')
+            widget.bind('<FocusIn>', lambda event: self.root.after_idle(lambda widget=event.widget: self.ensure_field_visible(widget)), add='+')
+            self.context_widgets[key] = widget
+            for target in (caption, widget):
+                Tooltip(target, lambda key=key: ('Required for this submission. ' if key in (self.required_keys or ()) else 'Optional unless applicable. ') + field_help(key, self.modality.get()))
+        self.new_identity_button.configure(text='New model ID' if self.modality.get() == 'computational' else 'New batch + sample IDs')
+        self.refresh_requirements()
         self.install_wheel_handlers(self.context_frame)
+
+    def schedule_requirements(self, *_):
+        if getattr(self, '_requirements_pending', None) is None:
+            self._requirements_pending = self.root.after_idle(self.refresh_requirements)
+
+    def mode_changed(self, selected):
+        if getattr(self, selected).get():
+            other = self.raw_only if selected == 'toolkit' else self.toolkit
+            if other.get(): other.set(False)
+        self.schedule_requirements()
+
+    def refresh_requirements(self):
+        if self.adaptive: return self.refresh_workflow_requirements()
+        pending = getattr(self, '_requirements_pending', None)
+        if pending is not None:
+            self.root.after_cancel(pending)
+            self._requirements_pending = None
+        context = {key: var.get() for key, var in self.context_vars.items()}
+        required = required_context_keys(self.modality.get(), context, toolkit=self.toolkit.get() and not self.raw_only.get())
+        if required != self.required_keys:
+            focused = self.root.focus_get()
+            self.required_keys = required
+            labels = COMMON_CONTEXT | trace_context(self.modality.get()) | MODALITY_CONTEXT[self.modality.get()]
+            counts = {group: 0 for group in self.context_group_frames}
+            for field in self.context_fields.values(): field.grid_forget()
+            for frame in self.context_group_frames.values(): frame.pack_forget()
+            self.optional_context.pack_forget()
+            optional_count = 0
+            for key, field in self.context_fields.items():
+                if key in required:
+                    group = self.context_groups[key]
+                    index = counts[group]
+                    counts[group] += 1
+                    parent = self.context_group_frames[group]
+                    row = 1 + index // 2
+                    label = '* ' + labels[key]
+                else:
+                    index = optional_count
+                    optional_count += 1
+                    parent = self.optional_context.body
+                    row = index // 2
+                    label = labels[key] + ' · Optional'
+                self.context_labels[key].configure(text=label)
+                field.grid(in_=parent, row=row, column=index % 2, sticky='nsew')
+            for group, frame in self.context_group_frames.items():
+                if counts[group]: frame.pack(fill='x')
+            if optional_count: self.optional_context.pack(fill='x', pady=(14, 6))
+            if focused in self.context_widgets.values():
+                self.root.after_idle(lambda widget=focused: self.ensure_field_visible(widget))
+        if not hasattr(self, 'mapping_section'): return
+        mapping_needed = not (self.raw_only.get() or self.toolkit.get())
+        if mapping_needed:
+            self.mapping_note.pack_forget()
+            self.mapping_section.pack(fill='x', pady=(0, 12))
+        else:
+            self.mapping_section.pack_forget()
+            self.mapping_note.configure(text='Original files only: column mapping is not required. Sample and scientific context are still required.'
+                if self.raw_only.get() else 'Rochester toolkit: the dedicated mapping is supplied automatically. Processing method / version evidence is required above.')
+            self.mapping_note.pack(fill='x', pady=12)
+        values = [(self.title.get(), self.submission_widgets['title'])]
+        values.extend((getattr(self, key).get(), self.submission_widgets[key]) for key in ('entity', 'modality'))
+        values.extend((context[key], self.context_widgets[key]) for key in self.context_vars if key in required)
+        if mapping_needed:
+            values.extend((getattr(self, key).get(), widget) for key, widget in self.mapping_widgets.items())
+            values.extend((unit.get(), self.rule_widgets[name][1]) for name, target, unit, _ in self.rules
+                if target.get() != 'Ignore')
+        self.missing_widgets = [widget for value, widget in values if not value.strip()]
+        remaining = len(self.missing_widgets)
+        suffix = ' Add original files to begin.' if not self.sources else ''
+        if mapping_needed and not any(target.get() != 'Ignore' for _, target, _, _ in self.rules):
+            suffix += ' Read columns and map at least one field.'
+        self.required_summary.set(f'{len(values) - remaining} / {len(values)} required fields filled · {remaining} remaining.' + suffix + '\nValues and units are checked during review.')
+
+    def focus_missing(self):
+        self.refresh_requirements()
+        if self.missing_widgets:
+            widget = self.missing_widgets[0]
+        elif not (self.toolkit.get() or self.raw_only.get()) and not any(target.get() != 'Ignore' for _, target, _, _ in self.rules):
+            widget = next(iter(self.rule_widgets.values()))[0] if self.rules else self.read_columns_button
+        else:
+            widget = self.review_button
+        self.root.update_idletasks()
+        if widget is not self.review_button:
+            canvas = self.import_tab.canvas
+            y = widget.winfo_rooty() - self.import_tab.body.winfo_rooty()
+            canvas.yview_moveto(max(0, y - 70) / max(1, self.import_tab.body.winfo_height()))
+        widget.focus_set()
+
+    def ensure_field_visible(self, widget):
+        # Conditional fields can move between containers. Settle the resulting
+        # geometry and scroll region before measuring their new position.
+        self.root.update_idletasks()
+        if not widget.winfo_exists() or not widget.winfo_ismapped() or self.tabs.select() != str(self.import_tab): return
+        canvas = self.import_tab.canvas
+        y = widget.winfo_rooty() - self.import_tab.body.winfo_rooty()
+        top, height = canvas.canvasy(0), canvas.winfo_height()
+        if y < top + 12:
+            target = y - 70
+        elif y + widget.winfo_height() > top + height - 12:
+            target = y + widget.winfo_height() - height + 24
+        else:
+            return
+        canvas.yview_moveto(max(0, target) / max(1, self.import_tab.body.winfo_height()))
 
     def generate_dataset_id(self):
         self.context_vars['datasetId'].set(new_id(self.context_vars['acquisitionLab'].get(), 'DS'))
@@ -647,12 +851,14 @@ class Application:
         if not paths:
             return
         if len(paths) > 6:
-            messagebox.showerror('CATALYST', 'Select no more than six files.', parent=self.root)
+            self.show_action_error('Select no more than six files.', target='files')
             return
+        parse_tables = not self.adaptive or not self.raw_only.get()
         def work():
-            return load_sources(paths)
+            return load_sources(paths, parse_tables=parse_tables)
         def done(sources):
-            self.raw_only.set(all(s.artifact['format'] == 'binary' for s in sources))
+            if not self.adaptive or all(s.artifact['format'] == 'binary' for s in sources):
+                self.raw_only.set(all(s.artifact['format'] == 'binary' for s in sources))
             if self.raw_only.get():
                 self.toolkit.set(False)
             self.set_sources(sources)
@@ -678,7 +884,7 @@ class Application:
                 self.sheet_choice.set(profile['sheet'])
                 self.read_columns(profile)
         self.invalidate()
-        if self.raw_only.get() or self.toolkit.get(): self.mapping_section.set_open(False)
+        self.refresh_requirements()
         self.status.set('Source bytes are in memory. No extra research files were written to disk.')
 
     def render_file_list(self):
@@ -701,7 +907,7 @@ class Application:
         if not paths: return
         current = tuple(self.sources)
         if len(current) + len(paths) > 6:
-            messagebox.showerror('CATALYST', 'Select no more than six files in total.', parent=self.root)
+            self.show_action_error('Select no more than six files in total.', target='files')
             return
         selected = self.source_choice.get()
         sheet = self.sheet_choice.get()
@@ -732,12 +938,13 @@ class Application:
         else:
             self.sheet_choice.set('')
         self.rules = []
+        self.rule_widgets = {}
         for child in self.mapping_frame.winfo_children():
             child.destroy()
+        self.schedule_requirements()
 
     def read_columns(self, profile=None):
         try:
-            self.mapping_section.set_open(True)
             index = self.source_choice.current()
             if index < 0:
                 raise InputError('Select source files first.')
@@ -745,6 +952,7 @@ class Application:
             for child in self.mapping_frame.winfo_children():
                 child.destroy()
             self.rules = []
+            self.rule_widgets = {}
             known = {r['source']: r for r in profile['rules']} if profile else {}
             for row, name in enumerate(headers, 1):
                 saved = known.get(name, {})
@@ -754,27 +962,33 @@ class Application:
                 field = ttk.Frame(self.mapping_frame, padding=(0, 12))
                 field.pack(fill='x')
                 ttk.Label(field, text=name, style='Sub.TLabel', wraplength=500).grid(row=0, column=0, columnspan=2, sticky='w', pady=(0, 10))
-                ttk.Label(field, text='Canonical field', style='Small.TLabel').grid(row=1, column=0, sticky='w', pady=(0, 5))
-                ttk.Label(field, text='Source unit', style='Small.TLabel').grid(row=1, column=1, sticky='w', pady=(0, 5))
+                self.explain(ttk.Label(field, text='Column meaning · or Ignore', style='Small.TLabel'), 'mapping_target').grid(row=1, column=0, sticky='w', pady=(0, 5))
+                self.explain(ttk.Label(field, text='* Source unit if mapped', style='Small.TLabel'), 'mapping_unit').grid(row=1, column=1, sticky='w', pady=(0, 5))
                 target_combo = ttk.Combobox(field, textvariable=target, values=['Ignore'] + list(FIELDS), state='readonly', width=22)
+                Tooltip(target_combo, lambda target=target: field_help('mapping_target') + '\n\n' + field_help(target.get()))
                 target_combo.grid(row=2, column=0, sticky='ew', padx=(0, 12))
                 units = ttk.Combobox(field, textvariable=unit, values=FIELDS.get(target.get(), ('', []))[1], state='readonly', width=18)
+                self.explain(units, 'mapping_unit')
                 units.grid(row=2, column=1, sticky='ew')
                 def changed(_, target=target, unit=unit, units=units):
                     values = FIELDS.get(target.get(), ('', []))[1]
                     units.configure(values=values)
                     unit.set(values[0] if len(values) == 1 else '')
                 target_combo.bind('<<ComboboxSelected>>', changed)
-                ttk.Label(field, text='Exact name aliases · JSON, optional', style='Small.TLabel').grid(row=3, column=0, columnspan=2, sticky='w', pady=(10, 5))
-                ttk.Entry(field, textvariable=aliases, width=25).grid(row=4, column=0, columnspan=2, sticky='ew')
+                self.explain(ttk.Label(field, text='Exact name aliases · JSON, optional', style='Small.TLabel'), 'mapping_aliases').grid(row=3, column=0, columnspan=2, sticky='w', pady=(10, 5))
+                self.explain(ttk.Entry(field, textvariable=aliases, width=25), 'mapping_aliases').grid(row=4, column=0, columnspan=2, sticky='ew')
                 field.columnconfigure(0, weight=1, uniform='mapping')
                 field.columnconfigure(1, weight=1, uniform='mapping')
                 ttk.Separator(self.mapping_frame).pack(fill='x')
                 self.rules.append((name, target, unit, aliases))
+                self.rule_widgets[name] = (target_combo, units)
+                target.trace_add('write', self.schedule_requirements)
+                unit.trace_add('write', self.schedule_requirements)
             self.invalidate()
+            self.schedule_requirements()
             self.install_wheel_handlers(self.mapping_frame)
         except (InputError, ValueError):
-            messagebox.showerror('CATALYST', 'Choose a valid source worksheet and header row with unique text column names.', parent=self.root)
+            self.show_action_error('Choose a valid source worksheet and header row with unique text column names.', target='mapping')
 
     def current_profile(self):
         if self.toolkit.get() or self.raw_only.get():
@@ -802,15 +1016,19 @@ class Application:
         try:
             profile = self.current_profile()
             sources = tuple(self.sources)
-            context = {k: v.get() for k, v in self.context_vars.items()}
+            context = self.workflow_values() if self.adaptive else {k: v.get() for k, v in self.context_vars.items()}
             entity, modality, title = self.entity.get(), self.modality.get(), self.title.get()
             index, toolkit, raw_only = self.source_choice.current(), self.toolkit.get(), self.raw_only.get()
-            parent = self.revision.value()['id'] if self.revision else self.parent
+            parent = self.parent if self.adaptive else self.revision.value()['id'] if self.revision else self.parent
+            catalog = self.available_library() if self.adaptive else None
+            client, destination = self.client, dict(self.destination) if self.destination else None
         except InputError as e:
-            messagebox.showerror('CATALYST', str(e), parent=self.root)
+            self.stage_requested = False
+            self.show_action_error(str(e), target='mapping')
             return
         def work():
             preview = build_preview(sources, entity, modality, context, profile, index, toolkit, raw_only)
+            if context.get('workflowVersion') == '2': preview = self.prepare_inventory_preview(preview, catalog, client, destination)
             return Revision.create(preview, title, parent)
         def done(revision):
             self.revision = revision
@@ -819,7 +1037,8 @@ class Application:
             self.acknowledge.set(False)
             self.render_review(revision)
             self.tabs.select(self.review_tab)
-        self.run('Building the standardized review…', work, done)
+            if self.adaptive: self.workflow_preview_done(revision)
+        self.run('Building the standardized review…', work, done, failed=lambda: setattr(self, 'stage_requested', False))
 
     def text_panel(self, parent, height=10):
         frame = ttk.Frame(parent)
@@ -843,7 +1062,9 @@ class Application:
 
     def build_review(self):
         p = self.review_tab
-        page_heading(p, 'Review submission', 'Inspect the evidence, resolve warnings, then approve the exact revision.', 'CHECK  /  APPROVE  /  PUBLISH')
+        heading = ttk.Frame(p, style='Page.TFrame')
+        heading.pack(fill='x', pady=(0, 12))
+        ttk.Label(heading, text='Review submission', style='Heading.TLabel').pack(anchor='w')
         self.review_empty = Card(p, padding=36)
         self.review_empty.pack(fill='both', expand=True)
         empty = ttk.Frame(self.review_empty.body)
@@ -856,7 +1077,7 @@ class Application:
         self.review_content = Card(p, padding=18)
         p = self.review_content.body
         self.review_heading = tk.StringVar(value='Build a preview to review the standardized data.')
-        ttk.Label(p, textvariable=self.review_heading, style='Sub.TLabel', wraplength=1000).pack(anchor='w')
+        ttk.Label(p, textvariable=self.review_heading, style='Sub.TLabel', wraplength=535).pack(anchor='w')
         detail_tabs = ttk.Notebook(p)
         self.review_details = detail_tabs
         detail_tabs.pack(fill='both', expand=True, pady=8)
@@ -871,12 +1092,16 @@ class Application:
         sy.grid(row=0, column=1, sticky='ns'); sx.grid(row=1, column=0, sticky='ew')
         data_frame.columnconfigure(0, weight=1); data_frame.rowconfigure(0, weight=1)
         detail_tabs.add(data_frame, text='Standardized values')
-        issues_frame, self.issue_text = self.text_panel(detail_tabs)
+        issues_frame = self.build_issue_panel(detail_tabs)
         detail_tabs.add(issues_frame, text='Validation')
         trace_frame, self.trace_text = self.text_panel(detail_tabs)
         detail_tabs.add(trace_frame, text='Sample lineage')
         json_frame, self.preview_text = self.text_panel(detail_tabs)
         detail_tabs.add(json_frame, text='Provenance')
+        summary_frame, self.record_summary_text = self.text_panel(detail_tabs)
+        self.record_summary_text.configure(wrap='word', font=('Segoe UI', 10))
+        self.record_summary_frame = summary_frame
+        detail_tabs.add(summary_frame, text='Record summary')
         footer = ttk.Frame(p)
         footer.pack(side='bottom', fill='x', before=detail_tabs)
         p = footer
@@ -884,10 +1109,16 @@ class Application:
         form.pack(fill='x', pady=8)
         self.reviewer = tk.StringVar()
         self.review_note = tk.StringVar()
-        self.label_entry(form, 0, 'Reviewer name (self-reported)', self.reviewer)
-        self.label_entry(form, 1, 'Review note / warnings', self.review_note)
+        for column, (label, variable, help_key) in enumerate((
+                ('* Reviewer name (self-reported)', self.reviewer, 'reviewer'),
+                ('* Review note / warnings', self.review_note, 'review_note'))):
+            field = ttk.Frame(form)
+            field.grid(row=0, column=column, sticky='ew', padx=(0, 12 if column == 0 else 0))
+            form.columnconfigure(column, weight=1, uniform='review')
+            self.explain(ttk.Label(field, text=label, wraplength=245), help_key).pack(anchor='w', pady=(0, 4))
+            self.explain(ttk.Entry(field, textvariable=variable), help_key).pack(fill='x')
         self.acknowledge = tk.BooleanVar(value=False)
-        ttk.Checkbutton(p, text='I reviewed the data, context, mappings and all warnings.', variable=self.acknowledge).pack(anchor='w')
+        self.explain(ttk.Checkbutton(p, text='* I reviewed the data, context, mappings and all warnings.', variable=self.acknowledge), 'acknowledge').pack(anchor='w')
         actions = ttk.Frame(p)
         actions.pack(fill='x', pady=8)
         ttk.Button(actions, text='Approve this revision', style='Primary.TButton', command=self.approve).pack(side='left')
@@ -904,12 +1135,38 @@ class Application:
             'legacy_review': 'This older review has no structured consortium identity. Supply identity context before republishing.'}), ensure_ascii=False, indent=2))
         issues = preview['validation']['issues']
         errors = sum(i['severity'] == 'error' for i in issues)
-        self.review_details.select(1 if errors else 0)
+        adaptive = preview.get('context', {}).get('workflowVersion') == '2'
+        self.review_details.select(1 if errors else self.record_summary_frame if adaptive else 0)
+        if adaptive:
+            context = preview['context']
+            kind = context['recordType']
+            from .workflow import workflow_fields
+            labels = workflow_fields(kind, preview['modality'])
+            lines = [payload['title'], kind.capitalize() + ' · ' + preview['modality'], '']
+            if preview.get('publication_destination'):
+                lines.extend(['Run / experiment', preview['publication_destination']['experiment_name'], ''])
+            if context.get('methodStatus') == 'not-recorded':
+                lines.extend(['Method not recorded', 'Historical measurement: method information is incomplete.', ''])
+            if preview.get('native_inventory_plan'):
+                from .inventory import inventory_summary
+                lines.extend(['LIMS inventory actions', inventory_summary(preview['native_inventory_plan']), ''])
+            for key, label in labels.items():
+                if context.get(key) and key not in ('datasetId', 'submittingLab', 'acquisitionLab', 'processingLab'):
+                    lines.extend([label.replace(' (optional)', ''), str(context[key]), ''])
+            for row in search_procedures(self.available_library()):
+                procedure = row['procedure']
+                if procedure['id'] == context.get('procedureId' if kind == 'synthesis' else 'methodId') and str(procedure['version']) == context.get('procedureVersion' if kind == 'synthesis' else 'methodVersion'):
+                    lines.extend(['Linked method', row['label'], ''])
+            for row in search_samples(self.available_library()):
+                if row['subject']['id'] == context.get('specimenId'):
+                    lines.extend(['Linked sample', row['label'], row['subject'].get('description', ''), ''])
+            lines.extend(['Attached files'] + [a['filename'] + ' · ' + str(a['size_bytes']) + ' bytes' for a in preview['artifacts']])
+            if not preview['artifacts']: lines.append('No files. The information above is saved as a reusable record.')
+            self.show_text(self.record_summary_text, '\n'.join(lines))
         rows = preview['standardized'].get('rows', [])
-        mode = 'FILES + CONTEXT ONLY' if preview.get('data_status') == 'original_files_only' else f'{len(rows)} rows'
+        mode = 'METADATA RECORD' if preview.get('data_status') == 'metadata_only' else ('ORIGINAL FILES' if adaptive else 'FILES + CONTEXT ONLY') if preview.get('data_status') == 'original_files_only' else f'{len(rows)} rows'
         self.review_heading.set(f'{payload["title"]} · {mode} · {errors} blocking errors · revision {payload["id"][:8]}')
-        lines = [f'{i["severity"].upper()} · {i["code"]}\n{i["message"]}\n' for i in issues]
-        self.show_text(self.issue_text, '\n'.join(lines) or 'No validation issues.')
+        self.render_issues(issues)
         # Full payload remains immutable in memory; cap rendering to keep the UI responsive.
         text = json.dumps(payload, ensure_ascii=False, indent=2)
         self.show_text(self.preview_text, text[:500000] + ('\n[Display truncated; the full revision is retained.]' if len(text) > 500000 else ''))
@@ -937,17 +1194,31 @@ class Application:
             else f'Preview ready. Showing up to 1,000 rows; all {len(rows)} rows remain in the revision.')
 
     def approve(self):
+        if self.revision and any(issue['severity'] == 'error' for issue in self.revision.value()['preview']['validation']['issues']):
+            self.review_details.select(1)
+            self.approval_status.set('Select an issue and use its correction button before approving.')
+            return
         try:
             if self.busy or not self.revision or self.dirty:
                 raise InputError('Build a fresh preview after changing files, context, or mapping.')
             self.approval = self.revision.approve(self.reviewer.get(), self.review_note.get(), self.acknowledge.get())
+            from .contracts import approved_payload
+            approved_payload(self.revision, self.approval)
+            if self.review_batch_id:
+                self.batch_queue.approve(self.review_batch_id, self.approval)
+                self.refresh_batch()
             self.approval_status.set(f'Approved by {self.approval["reviewer"]} · SHA-256 {self.revision.sha256[:16]}…')
             self.status.set('Revision approved locally. It has not been sent to SciSure.')
         except InputError as e:
-            messagebox.showerror('CATALYST', str(e), parent=self.root)
+            self.approval = None
+            self.show_action_error(str(e), target='review' if self.revision and not self.dirty else None)
 
     def publish(self):
         if self.busy:
+            return
+        if self.review_batch_id:
+            self.tabs.select(self.batch_tab)
+            self.status.set('Use Send in Batch review to preserve dependency order and per-record transfer status.')
             return
         if not self.revision or not self.approval or self.dirty:
             messagebox.showinfo('CATALYST', 'Approve the current revision first.', parent=self.root)
@@ -956,87 +1227,60 @@ class Application:
             self.tabs.select(self.connection_tab)
             messagebox.showinfo('CATALYST', 'Connect and verify the destination first.', parent=self.root)
             return
+        reviewed_destination = self.revision.value()['preview'].get('publication_destination') or self.destination
         if not messagebox.askyesno('Send approved revision to SciSure',
             f'Send {len(self.sources)} original files and the approved review to:\n\n'
-            f'{self.destination["experiment_name"]}\nExperiment {self.destination["experiment_id"]} · Group {self.destination["group_id"]}\n'
-            f'{self.destination["tenant"]}\n\nExisting transfer steps are checked before new writes.', parent=self.root):
+            f'{reviewed_destination["experiment_name"]}\nExperiment {reviewed_destination["experiment_id"]} · Group {reviewed_destination["group_id"]}\n'
+            f'{reviewed_destination["tenant"]}\n\n' + ('The reviewed inventory actions will also register/reuse the sample and link it to this experiment.\n\n' if self.revision.value()['preview']['context'].get('inventoryMode') == 'native' else '') + 'Existing transfer steps are checked before new writes.', parent=self.root):
             return
         publisher, revision, approval, sources = self.publisher, self.revision, dict(self.approval), tuple(self.sources)
         def done(receipt):
             self.status.set(f'Transfer verified. SciSure experiment {receipt["destination"]["experiment_id"]}, section {receipt["section_id"]}.')
             self.approval_status.set('Published: original file checksums and completion receipt verified in SciSure.')
-        self.run('Starting direct SciSure transfer…', lambda: publisher.publish(revision, approval, sources,
+        self.run('Starting direct SciSure transfer…', lambda: self.publisher_for_revision(revision).publish(revision, approval, sources,
             lambda message: self.messages.put(('progress', message))), done)
 
     def build_catalog(self):
-        p = self.catalog_tab
-        page_heading(p, 'Samples & models', 'Follow a material across laboratories, measurements and revisions.', 'CONSORTIUM  /  SAMPLE LINEAGE')
-        card = Card(p)
-        card.pack(fill='both', expand=True)
-        p = card.body
-        ttk.Label(p, text='The shared identity catalog', style='Sub.TLabel').pack(anchor='w')
-        ttk.Label(p, text='Search by sample ID, lab or local label. Use an existing material or create a linked derivative.', style='Muted.TLabel', wraplength=550).pack(anchor='w', pady=(8, 18))
-        actions = ttk.Frame(p)
-        actions.pack(fill='x')
-        ttk.Button(actions, text='Refresh catalog', style='Primary.TButton', command=self.refresh_catalog).pack(side='left')
-        self.catalog_query = tk.StringVar()
-        ttk.Entry(actions, textvariable=self.catalog_query, width=24).pack(side='left', padx=8)
-        ttk.Button(actions, text='Search', command=self.filter_catalog).pack(side='left')
-        frame = ttk.Frame(p)
-        frame.pack(fill='both', expand=True, pady=10)
-        columns = ('id', 'origin', 'creator', 'batch', 'aliases', 'datasets')
-        self.catalog_table = ttk.Treeview(frame, columns=columns, show='headings', height=10)
-        for key, label in zip(columns, ('Canonical sample / model ID', 'Synthesis / model origin', 'Sample creator', 'Batch ID', 'Lab-specific labels', 'Datasets')):
-            self.catalog_table.heading(key, text=label)
-            self.catalog_table.column(key, width=240 if key in ('id', 'batch', 'aliases') else 140, stretch=False)
-        self.catalog_table.grid(row=0, column=0, sticky='nsew')
-        sy = ttk.Scrollbar(frame, orient='vertical', command=self.catalog_table.yview)
-        sx = ttk.Scrollbar(frame, orient='horizontal', command=self.catalog_table.xview)
-        self.catalog_table.configure(yscrollcommand=sy.set, xscrollcommand=sx.set)
-        sy.grid(row=0, column=1, sticky='ns')
-        sx.grid(row=1, column=0, sticky='ew')
-        frame.rowconfigure(0, weight=1)
-        frame.columnconfigure(0, weight=1)
-        footer = ttk.Frame(p)
-        footer.pack(side='bottom', fill='x', before=frame)
-        p = footer
-        buttons = ttk.Frame(p)
-        buttons.pack(fill='x')
-        ttk.Button(buttons, text='Use sample / model', command=lambda: self.use_catalog_subject(False)).pack(side='left')
-        ttk.Button(buttons, text='Create derivative', command=lambda: self.use_catalog_subject(True)).pack(side='left', padx=8)
-        ttk.Button(buttons, text='Repeat synthesis', command=self.repeat_catalog_procedure).pack(side='left')
-        self.catalog_status = tk.StringVar(value='Connect first, then refresh. No catalog is cached on disk.')
-        ttk.Label(p, textvariable=self.catalog_status, wraplength=550, style='Muted.TLabel').pack(anchor='w', pady=10)
+        self.build_sample_workspace()
 
     def refresh_catalog(self):
-        if not self.client or self.group_id is None:
-            self.tabs.select(self.connection_tab)
-            self.status.set('Connect to SciSure before reading the shared catalog.')
-            return
-        client, group = self.client, self.group_id
-        def done(catalog):
-            self.catalog = catalog
-            self.filter_catalog()
-            self.catalog_status.set(f'{len(catalog["entries"])} completed reviews scanned; '
-                f'{len(catalog["pending"])} incomplete transfers excluded from selection; '
-                f'{len(catalog.get("orphan_sections", []))} sections have no review manifest; '
-                f'{catalog["legacy_reviews"]} older reviews need identity registration. Scope: active group {group}.')
-        self.run('Reading the shared identity catalog from SciSure…', lambda: load_catalog(client, group,
-            lambda message: self.messages.put(('progress', message))), done)
+        self.refresh_sample_workspace()
 
     def filter_catalog(self):
-        self.catalog_rows = search_catalog(self.catalog, self.catalog_query.get()) if self.catalog else []
-        self.catalog_table.delete(*self.catalog_table.get_children())
-        for index, row in enumerate(self.catalog_rows):
-            s = row['subject']
-            self.catalog_table.insert('', 'end', iid=str(index), values=(s['id'], lab_name(row['origin_lab']),
-                lab_name(s['creator_lab']), s.get('batch_id', 'Computational model'), ', '.join(sorted(row['aliases'])), len(row['datasets'])))
+        self.filter_sample_workspace()
 
     def use_catalog_subject(self, derived=False):
+        if self.adaptive:
+            selection = self.catalog_table.selection()
+            if self.busy or not selection: return
+            from .library import sample_context
+            row = self.catalog_rows[int(selection[0])]
+            if not row.get('entry'):
+                if derived:
+                    self.status.set('Register this existing inventory sample in CATALYST before creating a derivative. Add a measurement to prepare its reference.')
+                else:
+                    self.start_selected_sample('measurement')
+                return
+            if 'model' in row['entry']['trace']:
+                self.status.set('This is a computational model. Open its saved review to revise or reuse its calculation details.')
+                return
+            if derived:
+                self.change_record_type('sample')
+                self.context_vars['parentSampleId'].set(row['subject']['id'])
+            else:
+                if self.record_type.get() not in ('measurement', 'synthesis'):
+                    self.change_record_type('measurement')
+                if self.record_type.get() not in ('measurement', 'synthesis'): return
+                self.apply_sample_choice(row)
+            self.tabs.select(self.import_tab)
+            return
         selection = self.catalog_table.selection()
         if self.busy or not selection:
             return
         row = self.catalog_rows[int(selection[0])]
+        if not row.get('entry'):
+            self.status.set('Open Add data / procedure to use native inventory with the adaptive workflow.')
+            return
         entry, subject = row['entry'], row['subject']
         computational = 'model' in entry['trace']
         if derived and computational:
@@ -1076,6 +1320,26 @@ class Application:
         self.status.set('Identity reused for a new dataset. Enter the actual acquisition lab, method, local labels, measurement context, and handoff evidence.')
 
     def repeat_catalog_procedure(self):
+        if self.adaptive:
+            if self.busy: return
+            selection = self.catalog_table.selection()
+            selected_id = self.catalog_rows[int(selection[0])]['subject']['id'] if selection else None
+            prior = set()
+            for entry in (self.catalog or {}).get('entries', []):
+                trace = entry['trace']
+                if trace.get('material', {}).get('id') == selected_id and trace.get('batch', {}).get('procedure'):
+                    p = trace['batch']['procedure']; prior.add((p['id'], p['version']))
+                if trace.get('synthesis_execution', {}).get('sample_id') == selected_id:
+                    p = trace['synthesis_execution']['procedure']; prior.add((p['id'], p['version']))
+            self.change_record_type('synthesis')
+            if self.record_type.get() != 'synthesis': return
+            matches = [row for row in search_procedures(self.available_library(), kind='synthesis', modality='synthesis') if row['key'] in prior]
+            if len(matches) == 1:
+                from .library import procedure_context
+                for key, value in procedure_context(matches[0]).items(): self.context_vars[key].set(str(value))
+                self.refresh_link_options()
+            self.status.set('Choose the registered product sample and a saved synthesis procedure. Record only this execution’s date, operator and changes.')
+            return
         selection = self.catalog_table.selection()
         if self.busy or not selection:
             return
@@ -1096,7 +1360,6 @@ class Application:
         self.generate_identity('batch')
         self.revision = self.approval = self.parent = None
         self.invalidate()
-        self.context_section.set_open(True)
         self.tabs.select(self.import_tab)
         self.status.set('Shared procedure copied into a new lab-specific synthesis draft. '
             'Enter this execution’s actual record, date, batch label, deviations, state, and scale.')
@@ -1207,6 +1470,11 @@ class Application:
         preview = payload['preview']
         if self.sources and not messagebox.askyesno('Replace current working review', 'Replace the current in-memory working files and context with this saved review? Unsaved changes will be discarded.', parent=self.root):
             return
+        if preview.get('schema_version') == 'catalyst-desktop-review/3':
+            self.load_workflow_draft(payload, loaded['sources'])
+            return
+        self.adaptive = False
+        self.workflow_card.pack_forget()
         self.new_submission(ask=False)
         self.parent = payload['id']
         self.title.set(payload['title'])
@@ -1341,6 +1609,8 @@ class Application:
 
     def new_submission(self, ask=True):
         if self.busy: return
+        if self.adaptive:
+            return self.change_record_type(self.record_type.get(), confirm=ask)
         if ask and self.sources and not messagebox.askyesno('New submission', 'Discard the current in-memory review and start a new submission? SciSure records and source files will remain unchanged.', parent=self.root):
             return
         self.revision = self.approval = self.parent = None
@@ -1356,8 +1626,9 @@ class Application:
         self.review_heading.set('Build a preview to review the standardized data.')
         self.review_content.pack_forget()
         self.review_empty.pack(fill='both', expand=True)
-        self.context_section.set_open(False)
-        self.mapping_section.set_open(False)
+        self.optional_context.set_open(False)
+        self.refresh_requirements()
+        self.import_tab.canvas.yview_moveto(0)
         self.data_table.delete(*self.data_table.get_children())
         self.show_text(self.issue_text, '')
         self.show_text(self.preview_text, '')
@@ -1368,8 +1639,10 @@ class Application:
         if self.busy:
             messagebox.showinfo('CATALYST', 'Wait for the current operation to finish before closing. An interrupted transfer may need reconciliation.', parent=self.root)
             return
-        if not self.smoke and self.sources and not messagebox.askyesno('Close CATALYST',
-            'Close and discard the in-memory working review? Original source files and anything already sent to SciSure will remain unchanged.', parent=self.root):
+        metadata_draft = self.adaptive and any(self.context_vars.get(key) and self.context_vars[key].get().strip()
+            for key in ('sampleDescription', 'procedureName', 'procedureText', 'procedureReference', 'modelDescription', 'acquiredAt', 'acquiredBy'))
+        if not self.smoke and (self.sources or self.batch_queue.items or metadata_draft) and not messagebox.askyesno('Close CATALYST',
+            'Close and discard the in-memory draft and batch queue? Records already sent to SciSure remain there.', parent=self.root):
             return
         self.client = None
         self.token.set('')

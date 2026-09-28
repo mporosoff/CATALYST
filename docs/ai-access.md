@@ -1,0 +1,86 @@
+# AI and analysis access (read-only)
+
+There are three ways in. All of them only read.
+
+## 1. One-click export (no programming)
+
+In the app, go to **Export & AI access → Choose folder & export**. You get:
+
+| File | Contents |
+| --- | --- |
+| `samples.csv` | One row per sample: identity, composition, procedure and version, the recipe actually used (`recipe_*`), deviations from the master procedure |
+| `data_records.csv` | One row per measurement with its conditions (`cond_*`) and the sample's recipe columns (`sample_*`). Ready for modeling. |
+| `procedures.csv` | Every version of every master procedure |
+| `catalyst_dataset.json` | Everything, nested |
+| `originals/…` | The original files (optional): `originals/<sample ID>/<data ID>/<file>` |
+
+## 2. Python (notebooks, ML pipelines)
+
+```python
+import pandas as pd
+from catalyst_query import CatalystReader   # this repository must be on PYTHONPATH
+
+db = CatalystReader(token='LAB-TOKEN', server='https://sandbox.elabjournal.com')
+samples = pd.DataFrame(db.samples(search='Mo K'))
+reactor = pd.DataFrame(db.data(technique='RXN'))     # conditions + recipe columns per test
+raw = db.file_bytes('UR-MDP-260925-01-RXN-01', 'gc-summary.csv')
+```
+
+From the command line:
+
+```
+python -m catalyst_query samples Mo2C
+python -m catalyst_query export ./out --technique RXN --originals
+```
+
+Both read `CATALYST_TOKEN` and `CATALYST_SERVER` from the environment.
+
+## 3. Live connection for an AI assistant (MCP)
+
+`catalyst_query.mcp_server` is a small, dependency-free MCP server. Its tools are:
+
+- `catalyst_summary`
+- `list_samples`
+- `get_sample`
+- `list_procedures`
+- `get_procedure`
+- `find_data`
+- `read_data_file`
+
+Example configuration for Claude Desktop (`claude_desktop_config.json`). The app's **Copy AI-assistant setup snippet** button copies this for you:
+
+```json
+{
+  "mcpServers": {
+    "catalyst": {
+      "command": "python",
+      "args": ["-m", "catalyst_query.mcp_server"],
+      "env": {
+        "CATALYST_SERVER": "https://sandbox.elabjournal.com",
+        "CATALYST_TOKEN": "PASTE-LAB-TOKEN",
+        "PYTHONPATH": "C:\\path\\to\\CATALYST"
+      }
+    }
+  }
+}
+```
+
+It needs Python 3.10 or later. The reader refuses any request other than a read, so an assistant can't change data even by mistake.
+
+## Record format (`catalyst-record/2`)
+
+Every record is JSON with `format`, `kind` (`sample`, `data`, `shipment` or `procedure`), `id`, `created_by` (`name`, `initials`, `lab`) and `created_at`, plus:
+
+- **sample:**
+  - `synthesis_date`, `composition`, `procedure` (`id`, `version`, `name`)
+  - `recipe` (the fields in `records.RECIPE_FIELDS`; numbers in °C, h, °C/min, g; `metals_parsed` = `[{component, wt_pct}]`)
+  - `deviations` (automatic differences from the master recipe), `deviation_notes`
+  - `amount_made_g`, `parent_id`, `notes`, `files`
+- **data:**
+  - `sample_id`, `technique` (code) and `technique_label`, `date`, `title`
+  - `conditions` (technique-specific, all optional)
+  - `pooled_with` (other samples in the same test), `notes`
+  - `files` (`name`, `sha256`, `size_bytes`)
+- **shipment:** `sample_id`, `from_lab`, `to_lab`, `date`, `amount`, `tracking`, `notes`
+
+Technique codes: RXN, HTE, PILOT, XRD, BET, CHEM, TPR, TPD, TPO, TEM, SEM, XPS, XAS, INSITU, RAMAN, IR, ICP, TGA, CALC, OTHER.

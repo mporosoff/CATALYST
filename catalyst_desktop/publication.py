@@ -152,24 +152,41 @@ class Publisher:
             for other_profile in catalog['profiles']:
                 if all(other_profile.get(k) == profile.get(k) for k in key) and digest(encode(other_profile)) != digest(encode(profile)):
                     raise InputError('This mapping version already has different rules in SciSure. Increase the profile version.')
+        return catalog
 
     def publish(self, revision, approval, sources, progress=lambda _: None):
         payload = validate_approval(revision, approval)
+        reviewed_destination = payload['preview'].get('publication_destination')
+        if reviewed_destination and any(reviewed_destination.get(key) != self.destination.get(key)
+                for key in ('tenant', 'group_id', 'experiment_id', 'study_id', 'project_id')):
+            raise InputError('This record was reviewed for another run. Use its reviewed run or edit and approve a new preview.')
         trace = payload['preview'].get('traceability')
         if not trace:
             raise InputError('This older review has no consortium identities. Create and approve a review with lab and sample lineage before publishing.')
         from .traceability import build_traceability
-        rebuilt, issues = build_traceability(payload['preview']['entity'], payload['preview']['modality'], payload['preview']['context'])
+        rebuilt, issues = build_traceability(payload['preview']['entity'], payload['preview']['modality'], payload['preview']['context'],
+            artifacts=payload['preview']['artifacts'])
         if rebuilt != trace or any(i['severity'] == 'error' for i in issues):
             raise InputError('The revision lineage does not match its context. Build and approve a new preview.')
-        check_sources(sources)
+        metadata_only = (payload['preview'].get('schema_version') == 'catalyst-desktop-review/3'
+            and payload['preview']['context'].get('uploadMode') == 'metadata'
+            and payload['preview']['context'].get('recordType') in ('sample', 'procedure', 'synthesis'))
+        if sources or not metadata_only: check_sources(sources)
         expected = [(a['filename'], a['sha256'], a['size_bytes']) for a in payload['preview']['artifacts']]
         actual = [(s.name, digest(s.content), len(s.content)) for s in sources]
         if expected != actual:
             raise InputError('The selected source files no longer match the approved revision.')
         self.client.verify_destination(self.destination)
         progress('Checking sample, procedure, and dataset identities across the active SciSure group…')
-        self._check_catalog(payload, revision.sha256, progress)
+        catalog = self._check_catalog(payload, revision.sha256, progress)
+        inventory_plan = payload['preview'].get('native_inventory_plan')
+        inventory = None
+        if inventory_plan:
+            from .inventory import NativeInventory
+            inventory = NativeInventory(self.client, self.destination, self.operations)
+            if any(inventory_plan[key] != self.destination[key] for key in ('tenant', 'group_id', 'experiment_id')):
+                raise InputError('The approved inventory actions target another experiment. Build and approve a new preview.')
+            inventory.check(inventory_plan, trace, payload['preview']['context'], catalog)
         packet = dict(format='catalyst-desktop-transfer/1', state='prepared',
             revision=payload, revision_sha256=revision.sha256, approval=approval, destination=self.destination)
         packet_bytes = encode(packet)
@@ -202,7 +219,10 @@ class Publisher:
         # A transfer may take minutes. Recheck shared identities after the upload,
         # before promoting this pending review to a completed catalog reference.
         progress('Rechecking shared identities before completing the transfer…')
-        self._check_catalog(payload, revision.sha256, progress)
+        catalog = self._check_catalog(payload, revision.sha256, progress)
+        if inventory:
+            progress('Applying and verifying the reviewed LIMS inventory actions…')
+            receipt['inventory'] = inventory.apply(inventory_plan, trace, payload['preview']['context'], catalog, progress)
         progress('Recording the verified transfer receipt…')
         receipt_id = self._file(section, RECEIPT, encode(receipt))
         progress('Verifying the complete saved review and originals…')
@@ -245,7 +265,11 @@ def read_review(client, destination, section_id, with_sources=False):
         if packet.get('format') != 'catalyst-desktop-transfer/1' or packet.get('state') != 'prepared':
             raise ValueError
         revision = Revision(encode(packet['revision']), packet['revision_sha256'])
-        validate_approval(revision, packet['approval'])
+        payload = validate_approval(revision, packet['approval'])
+        reviewed_destination = payload['preview'].get('publication_destination')
+        if reviewed_destination and any(reviewed_destination.get(key) != destination.get(key)
+                for key in ('tenant', 'group_id', 'experiment_id', 'study_id', 'project_id')):
+            raise ValueError('Stored records must remain bound to the run in their approved review.')
         if selected['sectionHeader'] != PREFIX + revision.value()['id']:
             raise ValueError
         if any(packet['destination'][k] != destination[k] for k in ('tenant', 'group_id', 'experiment_id', 'study_id', 'project_id')):
@@ -265,6 +289,12 @@ def read_review(client, destination, section_id, with_sources=False):
                     or receipt.get('destination') != packet['destination']):
                 raise ValueError
             expected_files = revision.value()['preview']['artifacts']
+            inventory_plan = revision.value()['preview'].get('native_inventory_plan')
+            if inventory_plan:
+                from .inventory import validate_inventory_receipt
+                validate_inventory_receipt(receipt.get('inventory'), inventory_plan)
+            elif receipt.get('inventory') is not None:
+                raise ValueError('Unapproved inventory actions in receipt.')
             if not isinstance(receipt.get('files'), list) or len(receipt['files']) != len(expected_files):
                 raise ValueError
             for i, (expected, actual) in enumerate(zip(expected_files, receipt['files']), 1):

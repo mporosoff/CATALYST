@@ -7,6 +7,7 @@ import uuid
 from .model import (InputError, MAX_FILE, MAX_TOTAL, MODALITIES, encode, digest,
     make_profile, context_issues, FIELDS, validate_numeric_field, toolkit_review_data)
 from .traceability import lab_id, build_traceability
+from .workflow import is_workflow, METADATA_TYPES, workflow_mapping_issues
 from catalyst_ingest.readers import source_filename, MAX_ROWS
 
 
@@ -28,8 +29,8 @@ def _timestamp(value):
     return result
 
 
-def artifact_manifest(artifacts):
-    if not isinstance(artifacts, list) or not 1 <= len(artifacts) <= 6:
+def artifact_manifest(artifacts, allow_empty=False):
+    if not isinstance(artifacts, list) or not (0 if allow_empty else 1) <= len(artifacts) <= 6:
         raise ValueError('Invalid source count.')
     names, total = set(), 0
     for item in artifacts:
@@ -77,7 +78,7 @@ def approved_payload(revision, approval):
             raise ValueError('Approval precedes revision creation.')
         preview = payload['preview']
         if not isinstance(preview, dict) or preview.get('schema_version') not in (
-                'catalyst-desktop-review/1', 'catalyst-desktop-review/2'):
+                'catalyst-desktop-review/1', 'catalyst-desktop-review/2', 'catalyst-desktop-review/3'):
             raise ValueError('Unsupported review schema.')
         if preview['modality'] not in MODALITIES or lab_id(preview['entity']) != preview['entity']:
             raise ValueError('Invalid modality or lab.')
@@ -85,7 +86,24 @@ def approved_payload(revision, approval):
         if not isinstance(context, dict) or len(context) > 100 or any(not isinstance(k, str) or len(k) > 100
                 or not isinstance(v, str) or len(v) > 4000 for k, v in context.items()):
             raise ValueError('Invalid context.')
-        artifact_manifest(preview['artifacts'])
+        adaptive = preview['schema_version'] == 'catalyst-desktop-review/3'
+        destination = preview.get('publication_destination')
+        if destination is not None:
+            from .scisure import remote_id, tenant_origin
+            if not isinstance(destination, dict) or tenant_origin(destination.get('tenant')) != destination['tenant']:
+                raise ValueError('Invalid reviewed run destination.')
+            for key in ('group_id', 'experiment_id', 'study_id', 'project_id'): remote_id(destination.get(key))
+            _text(destination.get('experiment_name'), 1000)
+            if destination.get('signature_status') != 'None': raise ValueError('The reviewed run was not writable.')
+            native_plan = preview.get('native_inventory_plan')
+            if native_plan and any(native_plan.get(key) != destination[key] for key in ('tenant', 'group_id', 'experiment_id')):
+                raise ValueError('The reviewed run and sample link destination disagree.')
+        if adaptive != is_workflow(context):
+            raise ValueError('Workflow marker and review schema disagree.')
+        metadata_only = adaptive and context.get('uploadMode') == 'metadata' and context.get('recordType') in METADATA_TYPES
+        artifact_manifest(preview['artifacts'], allow_empty=metadata_only)
+        if metadata_only and preview['artifacts']:
+            raise ValueError('Metadata-only records cannot contain artifacts.')
         validation = preview['validation']
         if (not isinstance(validation, dict) or validation.get('version') != 'desktop/1'
                 or not isinstance(validation.get('issues'), list) or len(validation['issues']) > 1000):
@@ -104,8 +122,14 @@ def approved_payload(revision, approval):
         if not isinstance(rows, list) or len(rows) > MAX_ROWS or any(not isinstance(r, dict) for r in rows):
             raise ValueError('Invalid standardized rows.')
         trace = preview.get('traceability')
-        if preview['schema_version'] == 'catalyst-desktop-review/2':
-            rebuilt, issues = build_traceability(preview['entity'], preview['modality'], context)
+        if context.get('inventoryMode') == 'native':
+            if not adaptive: raise ValueError('Native inventory requires an adaptive review.')
+            from .inventory import validate_inventory_plan
+            validate_inventory_plan(preview.get('native_inventory_plan'), trace, context)
+        elif preview.get('native_inventory_plan') is not None:
+            raise ValueError('Inventory actions were not selected for this review.')
+        if preview['schema_version'] in ('catalyst-desktop-review/2', 'catalyst-desktop-review/3'):
+            rebuilt, issues = build_traceability(preview['entity'], preview['modality'], context, preview['artifacts'])
             issues += context_issues(context, preview['modality'], 'toolkit_source_review' in preview)
             if trace != rebuilt or any(i['severity'] == 'error' for i in issues):
                 raise ValueError('The lineage or scientific context is incomplete or inconsistent.')
@@ -116,6 +140,8 @@ def approved_payload(revision, approval):
         if not isinstance(profile, dict):
             raise ValueError('Invalid mapping profile.')
         if profile.get('format') == 'catalyst-mapping/1':
+            if adaptive and context.get('uploadMode') != 'mapped':
+                raise ValueError('Mapping mode and workflow disagree.')
             checked = make_profile(**{k: profile[k] for k in ('entity', 'modality', 'source_format',
                 'source_version', 'name', 'version', 'sheet', 'header_row', 'rules')})
             source_hash = preview['normalization']['source_artifact_sha256']
@@ -124,6 +150,8 @@ def approved_payload(revision, approval):
                     or not any(a['sha256'] == source_hash and a['format'] == profile['source_format'] for a in preview['artifacts'])):
                 raise ValueError('Mapping profile and source bindings do not match.')
             targets = [r['target'] for r in profile['rules']]
+            if adaptive and workflow_mapping_issues(context, preview['modality'], profile['rules']):
+                raise ValueError('The mapped fields do not satisfy the selected data type.')
             if not rows or preview['standardized']['columns'] != targets:
                 raise ValueError('Missing standardized columns or rows.')
             seen = set()
@@ -153,9 +181,16 @@ def approved_payload(revision, approval):
                     if any(row.get(key) is not None and row[key] not in permitted for key in ('specimen_id', 'model_id')):
                         raise ValueError('Standardized subject labels do not match declared lineage.')
         elif preview['normalization'].get('method') == 'preserve-files-with-context/1':
-            if rows or preview.get('data_status') != 'original_files_only' or preview['normalization'].get('executed') is not False:
+            if (rows or preview.get('data_status') != 'original_files_only' or preview['normalization'].get('executed') is not False
+                    or (adaptive and context.get('uploadMode') != 'originals')):
                 raise ValueError('Files-only mode cannot claim standardized results.')
+        elif preview['normalization'].get('method') == 'metadata-record/1':
+            if (not metadata_only or rows or preview['standardized'].get('columns') or preview.get('data_status') != 'metadata_only'
+                    or preview['normalization'].get('executed') is not False):
+                raise ValueError('Only explicit metadata records can omit original files and standardized data.')
         elif profile.get('id') == 'ur-reactor-toolkit-gc-bundle-v1' and profile.get('version') == '0.1.0':
+            if adaptive and context.get('uploadMode') != 'mapped':
+                raise ValueError('Toolkit mode and workflow disagree.')
             original = preview['toolkit_source_review']
             if (not isinstance(original, dict) or original.get('profile') != profile
                     or original.get('profile_content_sha256') != preview['normalization'].get('profile_sha256')

@@ -21,6 +21,7 @@ from test_configuration import SchemaAPI
 from test_desktop import FakeSciSure, review
 from catalyst_desktop.scisure import SciSureClient, SANDBOX
 from catalyst_desktop.publication import Publisher
+from catalyst_desktop.configuration import material_fields
 
 
 def descendants(widget):
@@ -72,12 +73,56 @@ def check_navigation(app):
         expected = COMMON_CONTEXT | trace_context(selected) | MODALITY_CONTEXT[selected]
         assert set(app.context_vars) == set(expected), 'Grouping omitted scientific context fields'
         assert all(app._scroll_tag in w.bindtags() for w in descendants(app.context_frame))
-    app.mapping_section.set_open(True)
+    assert not any(isinstance(w, ttk.Notebook) for w in descendants(app.context_frame)), 'Context must be one form, not tabs'
     root.update()
-    assert app.mapping_section.body.winfo_ismapped()
-    app.mapping_section.toggle_button.invoke()
+    assert app.mapping_section.winfo_ismapped(), 'Required mapping must be visible without a disclosure'
+    for key in app.required_keys:
+        assert app.context_widgets[key].winfo_ismapped(), f'Required field {key} is hidden'
+        assert app.context_labels[key].cget('text').startswith('* ')
+        assert app.context_widgets[key]._tooltip is not None
+    assert not app.context_widgets['identityNote'].winfo_ismapped(), 'Optional notes should start collapsed'
+    app.optional_context.toggle_button.invoke()
     root.update()
-    assert not app.mapping_section.body.winfo_ismapped()
+    assert app.context_widgets['identityNote'].winfo_ismapped()
+    app.optional_context.set_open(False)
+    parent_widget = app.context_widgets['parentSampleId']
+    parent_var = app.context_vars['parentSampleId']
+    app.context_vars['materialKind'].set('aliquot')
+    root.update()
+    assert 'parentSampleId' in app.required_keys and parent_widget.winfo_ismapped()
+    assert app.context_widgets['parentSampleId'] is parent_widget and app.context_vars['parentSampleId'] is parent_var
+    app.context_vars['materialKind'].set('batch material')
+    app.context_vars['acquisitionLab'].set('SLAC')
+    root.update()
+    for key in ('custodyFromLab', 'custodyRecord', 'receivedAt'):
+        assert key in app.required_keys and app.context_widgets[key].winfo_ismapped()
+    app.context_vars['acquisitionLab'].set('Rochester')
+    app.toolkit.set(True)
+    root.update()
+    assert 'processingVersion' in app.required_keys
+    assert app.context_widgets['processingVersion'].winfo_ismapped()
+    assert not app.mapping_section.winfo_ismapped()
+    app.raw_only.set(True)
+    root.update()
+    assert not app.toolkit.get(), 'Import modes must be mutually exclusive'
+    assert 'processingVersion' not in app.required_keys
+    app.raw_only.set(False)
+    root.update()
+    assert app.mapping_section.winfo_ismapped()
+    app.focus_missing()
+    root.update()
+    first = app.missing_widgets[0]
+    assert 0 <= first.winfo_rooty() - canvas.winfo_rooty() < canvas.winfo_height(), 'Missing field was not scrolled into view'
+    app.show_help()
+    root.update()
+    help_window = app.help_window
+    app.show_help()
+    assert app.help_window is help_window, 'Help should reuse the open pane'
+    app.help_pane.show_guide('access')
+    app.help_navigate('records')
+    root.update()
+    assert app.tabs.select() == str(app.history_tab) and help_window.winfo_exists()
+    help_window.destroy()
     # Native data/text views must retain their own wheel handling.
     assert app.route_wheel(SimpleNamespace(widget=app.data_table, delta=delta)) is None
     assert app.route_wheel(SimpleNamespace(widget=app.issue_text, delta=delta)) is None
@@ -124,6 +169,96 @@ def check_navigation(app):
     root.update()
     root.withdraw()
 
+
+def check_required_field_navigation(app):
+    """Exercise missing mappings and conditional fields with real focus and typing."""
+    root = app.root
+    app.new_submission(ask=False)
+    app.modality.set('synthesis')
+    app.rebuild_context()
+    app.title.set('Synthetic required-field navigation')
+    for key, value in physical_context().items():
+        app.context_vars[key].set(value)
+    app.set_sources([Source.from_bytes('synthetic-navigation.csv', b'mass\n72\n')])
+    app.source_version.set('synthetic navigation v1')
+    app.read_columns()
+    app.tabs.select(app.import_tab)
+    root.geometry('900x680')
+    root.deiconify()
+    root.focus_force()
+    root.update()
+    canvas = app.import_tab.canvas
+
+    def assert_visible(widget):
+        top = widget.winfo_rooty() - canvas.winfo_rooty()
+        assert widget.winfo_ismapped() and 0 <= top, f'Focused field is above the visible form: top={top}, canvas height={canvas.winfo_height()}'
+        assert top + widget.winfo_height() <= canvas.winfo_height(), f'Focused field is below the visible form: bottom={top + widget.winfo_height()}, canvas height={canvas.winfo_height()}'
+
+    # Reading columns must lead to the first target when every column is ignored.
+    name, target, unit, _ = app.rules[0]
+    target_widget, unit_widget = app.rule_widgets[name]
+    assert target.get() == 'Ignore' and not app.missing_widgets
+    app.focus_missing()
+    root.update()
+    assert root.focus_get() is target_widget, 'All-Ignore mapping must focus the first column meaning'
+    assert_visible(target_widget)
+
+    # A selected meaning with no source unit is a missing required field.
+    target.set('mass_g')
+    unit.set('')
+    root.update()
+    assert app.missing_widgets == [unit_widget], 'A mapped column without a source unit must be counted'
+    assert '1 remaining.' in app.required_summary.get()
+    app.focus_missing()
+    root.update()
+    assert root.focus_get() is unit_widget, 'Next missing field must focus the blank source unit'
+    assert_visible(unit_widget)
+    unit.set('mg')
+    root.update()
+    assert not app.missing_widgets and '0 remaining.' in app.required_summary.get()
+
+    # The first typed handoff character promotes this optional field. The same
+    # entry and variable must survive, retain focus, and remain fully visible.
+    key = 'custodyRecord'
+    widget, variable = app.context_widgets[key], app.context_vars[key]
+    assert key not in app.required_keys and not variable.get()
+    app.optional_context.set_open(True)
+    root.update()
+    widget.focus_force()
+    root.update()
+    assert_visible(widget)
+    widget.insert('end', 'S')
+    root.update()
+    assert key in app.required_keys
+    assert app.context_widgets[key] is widget and app.context_vars[key] is variable
+    assert root.focus_get() is widget and variable.get() == 'S'
+    assert_visible(widget)
+    widget.insert('end', 'ynthetic handoff')
+    root.update()
+    assert variable.get() == widget.get() == 'Synthetic handoff'
+    assert root.focus_get() is widget
+    assert_visible(widget)
+
+    # Hover help on captions must not introduce an extra stop for every field.
+    for widget in app.context_widgets.values():
+        if widget.winfo_ismapped():
+            assert not isinstance(widget.tk_focusNext(), (tk.Label, ttk.Label)), 'Tab must skip field captions'
+    entry = app.context_widgets['acquiredAt']
+    entry.focus_force()
+    root.update()
+    following = entry.tk_focusNext()
+    entry.event_generate('<Tab>')
+    root.update()
+    assert root.focus_get() is following, 'Native Tab traversal must reach the next control'
+    assert not isinstance(root.focus_get(), (tk.Label, ttk.Label))
+
+    app.new_submission(ask=False)
+    app.source_version.set('')
+    root.geometry('1180x860')
+    root.update()
+    root.withdraw()
+
+
 def finish(app):
     deadline = time.monotonic() + 20
     while app.busy and time.monotonic() < deadline:
@@ -133,8 +268,9 @@ def finish(app):
 
 root = tk.Tk()
 root.withdraw()
-app = Application(root, smoke=True)
+app = Application(root, smoke=True, legacy=True)
 check_navigation(app)
+check_required_field_navigation(app)
 app.modality.set('synthesis')
 app.rebuild_context()
 app.title.set('Synthetic GUI check')
@@ -152,7 +288,8 @@ app.rules[0][2].set('mg')
 app.rules[1][1].set('specimen_id')
 app.rules[1][2].set('text')
 errors = []
-with patch('tkinter.messagebox.showerror', side_effect=lambda *a, **kw: errors.append(a)):
+with patch('tkinter.messagebox.showerror', side_effect=lambda *a, **kw: errors.append(a)), \
+        patch.object(app, 'show_action_error', side_effect=lambda message, **kwargs: errors.append(('CATALYST', message))):
     app.preview()
     deadline = time.monotonic() + 20
     while app.busy and time.monotonic() < deadline:
@@ -166,9 +303,15 @@ with patch('tkinter.messagebox.showerror', side_effect=lambda *a, **kw: errors.a
     root.deiconify()
     root.update()
     for button in descendants(app.review_content):
-        if isinstance(button, ttk.Button):
+        if isinstance(button, ttk.Button) and button is not app.fix_issue_button:
             assert button.winfo_ismapped(), 'Review action disappeared at the minimum window size'
             assert button.winfo_rooty() + button.winfo_height() <= app.status_label.winfo_rooty()
+    app.review_details.select(1)
+    root.update()
+    assert app.fix_issue_button.winfo_ismapped(), ('Validation correction must remain available in its selected tab',
+        [(str(w), w.winfo_geometry(), w.winfo_ismapped()) for w in
+         (app.review_details, app.fix_issue_button.master, app.issue_heading, app.fix_issue_button)])
+    assert app.fix_issue_button.winfo_rooty() + app.fix_issue_button.winfo_height() <= app.status_label.winfo_rooty()
     root.withdraw()
     app.reviewer.set('Synthetic reviewer')
     app.review_note.set('Checked source units and context.')
@@ -271,7 +414,7 @@ with patch('tkinter.messagebox.showerror', side_effect=lambda *a, **kw: errors.a
     apply_schema = next(w for w in descendants(root) if isinstance(w, ttk.Button) and w.cget('text') == 'Apply listed schema additions')
     apply_schema.invoke()
     finish(app)
-    assert schema_api.native_posts == 17
+    assert schema_api.native_posts == 1 + len(material_fields())
     assert 'Native material schema verified' in app.status.get()
     # A selected custom server drives connection and origin-bound credential storage.
     api = FakeSciSure()
@@ -350,8 +493,9 @@ with patch('tkinter.messagebox.showerror', side_effect=lambda *a, **kw: errors.a
     assert app.transfer_operations, 'Disconnecting must retain uncertain-write guards'
     app.new_submission(ask=False)
     assert app.review_empty.winfo_manager() == 'pack' and app.review_content.winfo_manager() == ''
-    assert not app.context_section.opened and not app.mapping_section.opened
+    assert not app.optional_context.opened
+    assert app.mapping_section.winfo_manager() == 'pack'
     assert app.review_button.instate(['disabled'])
     assert not errors, str(errors)
     app.close()
-print('Native GUI smoke passed: layout, mapping, approval, schema setup, custom-server credentials, verified review/file downloads, cancelled/failed saves, reconnect guards, and disconnected state. No network calls.')
+print('Native GUI smoke passed: layout, required-field navigation, mapping, approval, schema setup, custom-server credentials, verified review/file downloads, cancelled/failed saves, reconnect guards, and disconnected state. No network calls.')

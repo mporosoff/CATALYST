@@ -16,11 +16,12 @@ from catalyst_ingest.jsonio import strict_loads
 from catalyst_ingest.toolkit import preview_toolkit_bundle
 from . import __version__
 from .traceability import lab_id, build_traceability, attach_subject, date_value
+from .workflow import is_workflow, workflow_context_issues, METADATA_TYPES
 
 MAX_FILE = 20 * 1024 * 1024
 MAX_TOTAL = 40 * 1024 * 1024
 MAX_CELLS = 200_000
-MODALITIES = ('reactor', 'synthesis', 'spectroscopy', 'XRD', 'XAFS/XANES', 'TPR', 'TPD', 'TPO', 'CO uptake', 'computational', 'imaging')
+MODALITIES = ('reactor', 'synthesis', 'spectroscopy', 'XRD', 'XAFS/XANES', 'TPR', 'TPD', 'TPO', 'CO uptake', 'computational', 'imaging', 'sample', 'procedure')
 FIELDS = {
     'specimen_id': ('text', ('text',)), 'species': ('text', ('text',)),
     'time_s': ('number', ('s', 'min', 'h')),
@@ -58,6 +59,7 @@ COMMON_CONTEXT = {
     'identityNote': 'Identity corrections / source-label notes',
 }
 MODALITY_CONTEXT = {
+    'sample': {}, 'procedure': {},
     'imaging': {'technique': 'Image type / technique (photo, SEM, TEM, other)',
         'imageContext': 'What is shown / acquisition instrument and conditions',
         'scaleReference': 'Scale / calibration reference (or explicitly not quantitative)'},
@@ -264,6 +266,8 @@ def make_profile(entity, modality, source_format, source_version, name, version,
         sheet=sheet, header_row=header_row, rules=normalized)
 
 def context_issues(context, modality, toolkit=False):
+    if is_workflow(context):
+        return workflow_context_issues(context, modality, toolkit)
     required = ['specimenId', 'runId', 'acquiredBy'] + list(MODALITY_CONTEXT[modality])
     if toolkit:
         required.append('processingVersion')
@@ -311,7 +315,6 @@ def toolkit_review_data(source_data, interval_text):
 
 
 def build_preview(sources, entity, modality, context, profile=None, source_index=0, toolkit=False, raw_only=False):
-    check_sources(sources)
     entity = lab_id(entity)
     if not entity.strip() or modality not in MODALITIES:
         raise InputError('Choose a partner and supported modality.')
@@ -319,13 +322,29 @@ def build_preview(sources, entity, modality, context, profile=None, source_index
             or not isinstance(v, str) or len(v) > 4000 for k, v in context.items()):
         raise InputError('Context values must be text, at most 4,000 characters each.')
     context = {k: v.strip() for k, v in context.items()}
+    adaptive = is_workflow(context)
+    metadata_only = (adaptive and context.get('recordType') in METADATA_TYPES
+        and context.get('uploadMode') == 'metadata' and not sources)
+    if not metadata_only:
+        check_sources(sources)
+    if adaptive and (context.get('uploadMode') == 'metadata') != metadata_only:
+        raise InputError('Metadata-only records cannot contain files. Choose original files when attaching supporting evidence.')
+    if adaptive and not metadata_only:
+        if (context.get('uploadMode') == 'originals') != raw_only:
+            raise InputError('The selected upload mode must match original-file preservation or mapped data review.')
     issues = context_issues(context, modality, toolkit)
-    traceability, trace_issues = build_traceability(entity, modality, context)
+    traceability, trace_issues = build_traceability(entity, modality, context, [s.metadata() for s in sources])
     issues.extend(trace_issues)
-    preview = dict(schema_version='catalyst-desktop-review/2', software_version=__version__, traceability=traceability,
+    preview = dict(schema_version='catalyst-desktop-review/3' if adaptive else 'catalyst-desktop-review/2', software_version=__version__, traceability=traceability,
         entity=entity.strip(), modality=modality, context=context, artifacts=[s.metadata() for s in sources],
         normalization={}, scientific_processing={'executed': False}, validation={'version': 'desktop/1', 'issues': issues},
         standardized={'columns': [], 'rows': []})
+    if metadata_only:
+        if toolkit or profile:
+            raise InputError('A metadata-only record cannot contain a data mapping or toolkit results.')
+        preview['normalization'] = dict(method='metadata-record/1', executed=False)
+        preview['data_status'] = 'metadata_only'
+        return attach_subject(preview)
     if raw_only:
         if toolkit:
             raise InputError('Choose either toolkit import or preserve-only mode.')

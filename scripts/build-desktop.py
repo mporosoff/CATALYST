@@ -14,16 +14,19 @@ sys.path.insert(0, str(root))
 from catalyst_desktop import __version__
 backend = 'keyring.backends.Windows' if sys.platform == 'win32' else 'keyring.backends.macOS' if sys.platform == 'darwin' else 'keyring.backends.SecretService'
 package_name = 'CATALYST-Windows' if sys.platform == 'win32' else 'CATALYST'
+# Keep PyInstaller's temporary build folders outside OneDrive: OneDrive locks them and the clean step fails.
+scratch = (Path(os.environ['LOCALAPPDATA']) / 'CATALYST-build' if sys.platform == 'win32' and os.environ.get('LOCALAPPDATA')
+    else root / '.desktop-build')
 command = [sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean',
     '--onefile' if sys.platform == 'win32' else '--onedir', '--windowed',
     '--name', package_name, '--distpath', str(root / 'desktop-dist'),
-    '--workpath', str(root / '.desktop-build' / 'work'), '--specpath', str(root / '.desktop-build'),
+    '--workpath', str(scratch / 'work'), '--specpath', str(root / '.desktop-build'),
     '--paths', str(root), '--hidden-import', backend,
     '--add-data', str(root / 'mappings') + ':mappings',
     str(root / 'scripts' / 'launch-desktop.py')]
 if sys.platform == 'darwin':
     command += ['--osx-bundle-identifier', 'edu.rochester.porosoff.catalyst']
-build_env = dict(os.environ, PYINSTALLER_CONFIG_DIR=str(root / '.desktop-build' / 'cache'))
+build_env = dict(os.environ, PYINSTALLER_CONFIG_DIR=str(scratch / 'cache'))
 subprocess.run(command, cwd=root, check=True, env=build_env)
 executable = root / 'desktop-dist' / ('CATALYST.app/Contents/MacOS/CATALYST' if sys.platform == 'darwin'
     else 'CATALYST-Windows.exe' if sys.platform == 'win32' else 'CATALYST/CATALYST')

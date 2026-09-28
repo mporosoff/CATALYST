@@ -1,10 +1,10 @@
 {
-  "format": "catalyst-scisure-configuration/1",
-  "version": 1,
+  "format": "catalyst-scisure-configuration/2",
+  "version": 2,
   "expected_group_name": "CATALYST",
   "sample_type": {
-    "name": "CATALYST Material v1",
-    "description": "[CATALYST schema catalyst-scisure-configuration/1] Physical catalyst materials, aliquots and treated specimens. Acquisition data and processing results belong to linked experiments. No default stock mass is assigned.",
+    "name": "CATALYST Material v2",
+    "description": "[CATALYST schema catalyst-scisure-configuration/2] Physical catalyst materials, aliquots and treated specimens. Register the sample once; synthesis executions, methods, acquisition data and processing results belong to linked experiments. No default stock mass is assigned.",
     "quantityRequired": false,
     "defaultQuantityType": "Mass",
     "defaultUnit": "MilliGram",
@@ -21,36 +21,6 @@
       },
       "source": "material.id",
       "encoding": "text",
-      "constant": null
-    },
-    {
-      "definition": {
-        "key": "catalyst_batch_id",
-        "sampleDataType": "TEXT",
-        "required": true,
-        "notes": "Independent synthesis batch; shared by its aliquots."
-      },
-      "source": "batch.id",
-      "encoding": "text",
-      "constant": null
-    },
-    {
-      "definition": {
-        "key": "origin_lab",
-        "sampleDataType": "COMBO",
-        "required": true,
-        "notes": "Lab that synthesized the original batch.",
-        "optionValues": [
-          "A*STAR",
-          "SLAC",
-          "VA Tech (computational)",
-          "Oxeon (pilot scale)",
-          "Northwestern",
-          "Rochester"
-        ]
-      },
-      "source": "batch.origin_lab",
-      "encoding": "lab_display_name",
       "constant": null
     },
     {
@@ -74,28 +44,12 @@
     },
     {
       "definition": {
-        "key": "origin_batch_label",
-        "sampleDataType": "TEXT",
+        "key": "sample_description",
+        "sampleDataType": "TEXTAREA",
         "required": true,
-        "notes": "Origin laboratory batch label; not a unique consortium identifier."
+        "notes": "Researcher-supplied sample description or composition; no synthesis history is required."
       },
-      "source": "batch.local_id",
-      "encoding": "text",
-      "constant": null
-    },
-    {
-      "definition": {
-        "key": "material_kind",
-        "sampleDataType": "COMBO",
-        "required": true,
-        "notes": "Batch material, aliquot, or treated material.",
-        "optionValues": [
-          "batch material",
-          "aliquot",
-          "treated material"
-        ]
-      },
-      "source": "material.kind",
+      "source": "material.description",
       "encoding": "text",
       "constant": null
     },
@@ -103,8 +57,8 @@
       "definition": {
         "key": "material_state",
         "sampleDataType": "TEXTAREA",
-        "required": true,
-        "notes": "State/treatment defining this material identity."
+        "required": false,
+        "notes": "Optional physical state or treatment defining this material."
       },
       "source": "material.state",
       "encoding": "text",
@@ -123,83 +77,6 @@
     },
     {
       "definition": {
-        "key": "shared_procedure_id",
-        "sampleDataType": "TEXT",
-        "required": true,
-        "notes": "Consortium shared synthesis procedure identifier."
-      },
-      "source": "batch.procedure.id",
-      "encoding": "text",
-      "constant": null
-    },
-    {
-      "definition": {
-        "key": "shared_procedure_version",
-        "sampleDataType": "TEXT",
-        "required": true,
-        "notes": "Exact procedure version; independent of mapping/software versions."
-      },
-      "source": "batch.procedure.version",
-      "encoding": "text",
-      "constant": null
-    },
-    {
-      "definition": {
-        "key": "shared_procedure_reference",
-        "sampleDataType": "TEXTAREA",
-        "required": true,
-        "notes": "Published native protocol version or exact shared procedure document reference."
-      },
-      "source": "batch.procedure.reference",
-      "encoding": "text",
-      "constant": null
-    },
-    {
-      "definition": {
-        "key": "synthesis_execution_id",
-        "sampleDataType": "TEXT",
-        "required": true,
-        "notes": "The particular laboratory execution that made this batch."
-      },
-      "source": "batch.synthesis_execution.id",
-      "encoding": "text",
-      "constant": null
-    },
-    {
-      "definition": {
-        "key": "synthesis_date_iso",
-        "sampleDataType": "TEXT",
-        "required": true,
-        "notes": "YYYY-MM-DD calendar date. Text deliberately preserves date-only precision without UTC conversion."
-      },
-      "source": "batch.synthesis_execution.performed_at",
-      "encoding": "text",
-      "constant": null
-    },
-    {
-      "definition": {
-        "key": "synthesis_record",
-        "sampleDataType": "TEXTAREA",
-        "required": true,
-        "notes": "Actual synthesis execution/ELN record, not just the shared SOP."
-      },
-      "source": "batch.synthesis_execution.record",
-      "encoding": "text",
-      "constant": null
-    },
-    {
-      "definition": {
-        "key": "synthesis_deviations",
-        "sampleDataType": "TEXTAREA",
-        "required": true,
-        "notes": "Actual deviations, including explicit none."
-      },
-      "source": "batch.synthesis_execution.deviations",
-      "encoding": "text",
-      "constant": null
-    },
-    {
-      "definition": {
         "key": "catalyst_schema_version",
         "sampleDataType": "TEXT",
         "required": true,
@@ -207,7 +84,7 @@
       },
       "source": null,
       "encoding": "text",
-      "constant": "1"
+      "constant": "2"
     }
   ],
   "structure": {
@@ -220,8 +97,8 @@
       "Northwestern",
       "Rochester"
     ],
-    "study_basis": "Acquisition/executing lab; origin lab is a separate sample field.",
-    "experiment_basis": "One synthesis execution or measurement/calculation acquisition; revisions remain with that work.",
+    "study_basis": "Acquisition/executing lab; sample owner is stored with the sample definition.",
+    "experiment_basis": "One sample registration, procedure definition, synthesis execution or measurement/calculation acquisition; revisions remain with that work.",
     "autoCollaborate": true,
     "approval_policy": "Preserve the existing project/study signing and approval policy.",
     "protocols": "Shared scientific procedure plus exact published protVersionID; never invent procedure content.",
@@ -249,5 +126,10 @@
     "quantity": "Optional inventory balance, entered separately; never infer stock mass from reactor loading.",
     "native_ids": "Discover from this tenant and record in memory/remote publication receipts; never hard-code example IDs."
   },
-  "installation_scope": "Creates only the dedicated material sample type and missing metadata fields. Does not create samples, projects, studies, protocols, sign records, or change permissions."
+  "migration": {
+    "from_sample_type": "CATALYST Material v1",
+    "strategy": "additive",
+    "guidance": "Version 2 is a separate sample type for new registrations. Existing version 1 types, fields and samples remain unchanged; no conversion or duplicate sample creation is performed. Keep existing sample IDs and reuse verified existing inventory records. Synthesis executions and procedure versions remain linked experiment records, rather than required sample fields."
+  },
+  "installation_scope": "Creates only the dedicated version 2 material sample type and missing metadata fields. Does not modify version 1 or unrelated types, create samples, projects, studies or protocols, sign records, or change permissions."
 }

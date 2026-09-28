@@ -8,6 +8,8 @@ on:
       - 'mappings/**'
       - 'tests/**'
       - 'scripts/*desktop*'
+      - 'scripts/test-*-gui.py'
+      - 'scripts/test-tooltips.py'
       - 'requirements-desktop*.txt'
       - 'docs/desktop*.md'
       - 'docs/consortium-workflow.md'
@@ -40,6 +42,17 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Test native desktop widgets
         run: python scripts/test-desktop-gui.py
+      - name: Test adaptive upload and batch review widgets
+        run: |
+          python scripts/test-workflow-gui.py
+          python scripts/test-native-inventory-gui.py
+          python scripts/test-sample-workspace-gui.py
+          python scripts/test-runs-gui.py
+          python scripts/test-issue-navigation-gui.py
+          python scripts/test-sample-documents-gui.py
+          python scripts/test-batch-gui.py
+          python scripts/test-redesign-gui.py
+          python scripts/test-tooltips.py
       - name: Package native desktop app
         run: python scripts/build-desktop.py
       - uses: actions/upload-artifact@v4
@@ -51,3 +64,30 @@ jobs:
             desktop-dist/dependency-audit-*.json
           if-no-files-found: error
           retention-days: 30
+
+  # Publish the downloads for teammates. Runs after every successful build on main (or a manual run):
+  # if this version (catalyst_desktop/__init__.py) has no release yet, it creates one with the Windows and Mac files.
+  # Bump __version__ to publish a new release; the app shows "Update" to everyone on an older version.
+  release:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-files
+          merge-multiple: true
+      - name: Publish release if this version is new
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(python3 -c "import re; print(re.search(r\"__version__ = '([^']+)'\", open('catalyst_desktop/__init__.py').read())[1])")
+          if gh release view "v$version" > /dev/null 2>&1; then
+            echo "Release v$version already exists. Bump __version__ to publish a new one."
+            exit 0
+          fi
+          gh release create "v$version" release-files/CATALYST-Windows.exe release-files/CATALYST-Mac-*.dmg \
+            --title "CATALYST $version" --notes-file docs/install.md --target "$GITHUB_SHA" --latest

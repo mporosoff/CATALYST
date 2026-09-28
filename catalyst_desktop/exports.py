@@ -102,7 +102,8 @@ def review_archive(loaded):
     revision = loaded['revision']
     payload = approved_payload(revision, loaded['approval'])
     sources = loaded['sources']
-    check_sources(sources)
+    if sources or payload['preview'].get('data_status') != 'metadata_only':
+        check_sources(sources)
     expected = [(a['filename'], a['sha256'], a['size_bytes']) for a in payload['preview']['artifacts']]
     actual = [(s.name, digest(s.content), len(s.content)) for s in sources]
     if loaded.get('state') != 'complete' or not loaded.get('receipt'):
@@ -119,6 +120,12 @@ def review_archive(loaded):
             raise ValueError
         remote_id(receipt.get('section_id'))
         remote_id(receipt.get('manifest_id'))
+        inventory_plan = payload['preview'].get('native_inventory_plan')
+        if inventory_plan:
+            from .inventory import validate_inventory_receipt
+            validate_inventory_receipt(receipt.get('inventory'), inventory_plan)
+        elif receipt.get('inventory') is not None:
+            raise ValueError('Unapproved inventory actions in receipt.')
         file_ids = set()
         for index, (source, file) in enumerate(zip(sources, receipt['files']), 1):
             if (not isinstance(file, dict) or file.get('source_name') != source.name
@@ -148,9 +155,12 @@ def review_archive(loaded):
             'CATALYST verified review download\n\n'
             'CATALYST-review.json contains the approved revision, units, mapping, context and provenance.\n'
             'CATALYST-complete.json is the SciSure transfer receipt.\n'
+            'Reviewed native inventory actions, when selected, are in the review; verified sample IDs and experiment links are in the receipt.\n'
             'standardized.json preserves exact standardized values and metadata.\n'
             'standardized.csv is a convenience table; spreadsheet software may infer types.\n'
             'Toolkit CSV quantities use one column per field and unit; all source evidence remains in standardized.json.\n'
             'Text beginning with spreadsheet formula characters is prefixed with an apostrophe in CSV only.\n'
-            'originals/ contains byte-for-byte verified source files. No scientific recalculation is performed.\n')
+            'originals/ contains byte-for-byte verified source files when supplied.\n'
+            'Metadata-only procedure, sample, or synthesis records keep their full details in CATALYST-review.json.\n'
+            'No scientific recalculation is performed.\n')
     return output.getvalue()

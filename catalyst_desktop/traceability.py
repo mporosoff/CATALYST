@@ -17,7 +17,7 @@ LABS = {
 LAB_CHOICES = tuple(name for _, name in LABS.values())
 ALIASES = {v.casefold(): key for key, (code, name) in LABS.items() for v in (key, code, name)}
 ALIASES.update({'va tech': 'virginia-tech', 'virginia tech': 'virginia-tech', 'oxeon': 'oxeon'})
-KINDS = ('BAT', 'SYN', 'SMP', 'DS', 'MDL')
+KINDS = ('BAT', 'SYN', 'SMP', 'DS', 'MDL', 'PRC')
 MATERIAL_KINDS = ('batch material', 'aliquot', 'treated material')
 MODEL_RELATIONS = ('no physical link', 'represents', 'derived from', 'compared with')
 
@@ -93,8 +93,11 @@ def date_value(value):
     return datetime.strptime(value, '%Y-%m-%d')
 
 
-def build_traceability(entity, modality, context):
+def build_traceability(entity, modality, context, artifacts=()):
     """Return structured declarations plus blocking issues for incomplete identity context."""
+    from .workflow import is_workflow, build_workflow_trace
+    if is_workflow(context):
+        return build_workflow_trace(entity, modality, context, artifacts)
     issues = []
     def error(code, text):
         issues.append(dict(code=code, message=text, severity='error'))
@@ -229,6 +232,11 @@ def identity_records(trace):
     for key in ('batch', 'material', 'model'):
         if key in trace:
             records[trace[key]['id']] = trace[key]
+    if 'procedure' in trace:
+        procedure = trace['procedure']
+        records[procedure['id'] + '@' + procedure['version']] = procedure
+    if 'synthesis_execution' in trace:
+        records[trace['synthesis_execution']['id']] = trace['synthesis_execution']
     if 'batch' in trace:
         execution = trace['batch']['synthesis_execution']
         records[execution['id']] = dict(execution, batch_id=trace['batch']['id'])
@@ -238,6 +246,16 @@ def identity_records(trace):
 def validate_catalog(incoming, saved):
     """Validate identities against complete saved packets in the active group."""
     records, aliases, procedures = {}, {}, {}
+    saved_materials = {t['material']['id']: t['material'] for t in saved if 'material' in t}
+    saved_procedures = {}
+    for trace in saved:
+        if 'procedure' in trace:
+            procedure = trace['procedure']
+            saved_procedures[(procedure['id'], procedure['version'])] = procedure
+        elif 'batch' in trace:
+            procedure = trace['batch']['procedure']
+            saved_procedures.setdefault((procedure['id'], procedure['version']),
+                dict(procedure, type='synthesis', modality='synthesis'))
     for trace in [*saved, incoming]:
         if 'batch' in trace:
             procedure = trace['batch']['procedure']
@@ -258,10 +276,10 @@ def validate_catalog(incoming, saved):
                 and t['material']['kind'] == 'batch material' and t['material']['id'] != subject['id'] for t in saved):
             raise InputError('This batch already has a root sample. Reuse it or register a linked aliquot instead.')
     if subject and subject.get('parent_sample_id'):
-        parent = records.get(subject['parent_sample_id'])
-        if not parent or parent.get('batch_id') != subject['batch_id']:
+        parent = saved_materials.get(subject['parent_sample_id'])
+        if not parent or ('batch_id' in subject and parent.get('batch_id') != subject['batch_id']):
             raise InputError('The parent sample must already be registered in this group and belong to the same batch.')
-        if parent['creator_lab'] != subject['creator_lab']:
+        if 'batch_id' in subject and parent['creator_lab'] != subject['creator_lab']:
             receipts = [t.get('custody_evidence') for t in [*saved, incoming]]
             if not any(r and r['sample_id'] == parent['id'] and r['to_lab'] == subject['creator_lab'] for r in receipts):
                 raise InputError('Record the parent sample’s handoff to the lab creating this derivative before publishing.')
@@ -272,8 +290,27 @@ def validate_catalog(incoming, saved):
             visited.add(parent['id'])
             parent = records.get(parent.get('parent_sample_id'))
     for linked in incoming.get('model', {}).get('related_sample_ids', []):
-        if not records.get(linked, {}).get('batch_id'):
+        if linked not in saved_materials:
             raise InputError('A model-linked physical sample must already be registered in this group: ' + linked)
+    if incoming.get('schema_version') == 'catalyst-traceability/2':
+        kind = incoming.get('record_type')
+        if kind in ('measurement', 'synthesis'):
+            sample = incoming.get('sample_ref', {}).get('id')
+            if sample != incoming['dataset'].get('subject_id') or sample not in saved_materials:
+                raise InputError('Select a completed, registered sample before saving this record.')
+        unknown_method = (kind == 'measurement' and incoming['dataset'].get('method_status') == 'not-recorded'
+            and incoming['dataset'].get('method') is None)
+        if kind in ('measurement', 'synthesis', 'computation') and not unknown_method:
+            method = incoming['dataset'].get('method') or {}
+            procedure = saved_procedures.get((method.get('id'), method.get('version')))
+            if not procedure:
+                raise InputError('Select a completed saved procedure and version before saving this record.')
+            if not (procedure.get('instructions') or procedure.get('reference') or procedure.get('artifact_sha256s')):
+                raise InputError('The selected procedure has no registered instructions or document evidence.')
+            if procedure.get('type') != kind:
+                raise InputError('The selected procedure type does not match this record type.')
+            if procedure.get('modality') != incoming['dataset'].get('modality'):
+                raise InputError('The selected procedure technique does not match this data type.')
     # Local aliases are deliberately not globally unique; canonical IDs remain authoritative.
     return [dict(lab=lab, local_label=label, canonical_ids=sorted(ids))
         for (lab, label), ids in aliases.items() if len(ids) > 1]

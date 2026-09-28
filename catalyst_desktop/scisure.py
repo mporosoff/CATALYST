@@ -97,7 +97,10 @@ class SciSureClient:
 
     def request(self, path, method='GET', data=None, binary=False):
         api_parts(path)
-        if method not in ('GET', 'POST') or (method == 'GET' and data is not None):
+        sample_link = (method == 'PUT' and re.fullmatch(r'/api/v1/experiments/sections/[1-9]\d*/samples', path)
+            and isinstance(data, list) and 1 <= len(data) <= 1000
+            and all(type(value) is int and 0 < value <= 9007199254740991 for value in data) and len(set(data)) == len(data))
+        if (method not in ('GET', 'POST') and not sample_link) or (method == 'GET' and data is not None):
             raise SciSureError('Unsupported SciSure operation.')
         write = method != 'GET'
         headers = {'Authorization': self._token, 'X-Requested-With': 'Swagger',
@@ -167,7 +170,8 @@ class SciSureClient:
             raise SciSureError('The transfer outcome is unknown. Check transfer status before retrying.' if write
                 else 'SciSure could not be read. Check the connection and try again.', write) from None
 
-    def list(self, path):
+    def list(self, path, limit=1000):
+        """Read every page. ``limit`` bounds the total so a partial list is never mistaken for all records."""
         parts = api_parts(path)
         if any(k.casefold() in ('$page', '$records', 'opts.paging.currentpage', 'opts.paging.maxrecords')
                 for k, _ in parse_qsl(parts.query, keep_blank_values=True)):
@@ -180,12 +184,13 @@ class SciSureClient:
             (r'/api/v1/experiments/\d+/collaborators', 'userID'),
             (r'/api/v1/sampleTypes/\d+/meta', 'sampleTypeMetaID'),
             (r'/api/v1/samples/\d+/meta', 'sampleMetaID'),
+            (r'/api/v1/experiments/sections/\d+/samples', 'sampleID'),
             (r'/api/v1/sampleTypes', 'sampleTypeID'), (r'/api/v1/samples', 'sampleID'),
             (r'/api/v1/experiments', 'experimentID'), (r'/api/v1/projects', 'projectID'),
-            (r'/api/v1/studies', 'studyID'), (r'/api/v1/protocols', 'protVersionID'),
+            (r'/api/v1/studies', 'studyID'), (r'/api/v1/protocols', 'protVersionID'), (r'/api/v1/files', 'fileID'),
             (r'/api/v1/users', 'userID')) if re.fullmatch(pattern, route)), None)
         rows, expected_total, page_size, seen = [], None, None, set()
-        for page in range(1000):
+        for page in range(max(1000, limit // 100 + 2)):
             response = self.request(path + ('&' if '?' in path else '?') + urlencode({'$page': page, '$records': 100}))
             if not isinstance(response, dict) or not isinstance(response.get('data'), list):
                 raise SciSureError('SciSure returned an unsupported paginated response.')
@@ -193,8 +198,8 @@ class SciSureClient:
             total, size = response.get('totalRecords'), response.get('maxRecords')
             if type(total) is not int or total < 0 or type(size) is not int or not 1 <= size <= 1000:
                 raise SciSureError('SciSure pagination is missing valid totalRecords/maxRecords; a partial result cannot be used.')
-            if total > 1000:
-                raise SciSureError('More than 1,000 records were returned. Narrow the SciSure workspace.')
+            if total > limit:
+                raise SciSureError(f'More than {limit:,} records were returned. Narrow the SciSure workspace.')
             if expected_total is None:
                 expected_total, page_size = total, size
             if (total != expected_total or size != page_size or response.get('currentPage', page) != page

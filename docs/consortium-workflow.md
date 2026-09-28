@@ -1,6 +1,6 @@
 # Consortium sample and data workflow
 
-CATALYST 0.4 records separate identities for the shared synthesis procedure, each laboratory's synthesis execution and batch, individual physical samples, measurement datasets, and computational models. A common procedure connects independent executions for comparison. It never establishes that two batches or samples are the same material.
+CATALYST separates reusable sample and procedure definitions from the work performed with them. Register a sample or method once, then select it for each synthesis execution, measurement, or calculation. Sharing a procedure does not mean that independently prepared samples are the same material. The current adaptive workflow replaces the older requirement to repeat synthesis, sample, and measurement details in every upload; older saved reviews keep their original evidence and validation rules.
 
 ## The six laboratories
 
@@ -13,66 +13,69 @@ CATALYST 0.4 records separate identities for the shared synthesis procedure, eac
 | Northwestern | NU | northwestern |
 | Rochester | UR | university-of-rochester |
 
-The parenthetical descriptions identify the roles supplied by the consortium; the app does not prohibit those labs from contributing other supported data types. Scale is recorded for synthesis and reactor work, so Oxeon pilot results can retain their actual scale and conditions.
+The parenthetical descriptions identify the consortium's supplied roles; the app does not restrict those labs to particular data types. The selected laboratory supplies the generated record ID and default attribution. Acquisition and processing evidence remains in each review package.
 
-## Physical material workflow
+## Register definitions, then add work
 
-1. **Agree on a shared procedure.** Record its consortium ID, exact version, and shared document or published SciSure protocol reference. Every lab uses the same reference for that version. A changed document requires review and a new procedure version. A mapping profile version is separate from a procedure version.
-2. **Register every independent synthesis execution.** In the catalog, select a sample and use **Repeat selected sample’s procedure as a new synthesis** to reuse the common procedure with fresh lab-specific IDs. The previous execution's details are cleared. Record the executing lab, date, actual ELN record, local batch label, and deviations, including an explicit `none` when appropriate. Generate a new synthesis execution ID and batch ID for each independently made batch, even when the composition, procedure, or local nickname matches another batch.
-3. **Identify the material.** Generate the batch's root sample ID. An aliquot or treated material receives a new sample ID and a parent link. A derivative keeps its original batch and synthesis-lab attribution, while recording the lab that created the aliquot or treated material and its state. Repeated measurements on the same unchanged specimen reuse its sample ID.
-4. **Carry the identity with the material.** Put the full canonical sample ID on the container label or its linked barcode record and packing list, alongside the lab's readable label. The current app generates and displays IDs; barcode printing and scanning are not implemented. A filename is evidence to preserve, not an authoritative sample identity.
-5. **Record handoffs.** Keep the sample ID when shipping it. Supply the sending lab, receiving lab, receipt date, and shipment/handoff record. Cross-lab measurements require this evidence. If the receiving lab makes an aliquot, reference the transferred parent and generate a new child ID. Handoff records are contributor declarations, not automatic current-location tracking.
-6. **Acquire and process data.** Create a dataset ID for each acquisition or calculation. Record the acquisition lab and person, method/version, date, local run label, source-format lab, submitting lab, and processing lab separately. Register one sample/model subject per submission. Every standardized row carries its canonical subject and dataset IDs.
-7. **Review and publish.** Check the Lab & sample lineage tab as well as values and warnings. Approval covers the immutable revision. The app reads saved identities across the active SciSure group before writing, rejects conflicting IDs, checks references and profile versions, and preserves raw files and provenance. Reprocessing the same acquisition creates a new review revision while retaining the dataset ID and its acquisition identity. A new acquisition receives a new dataset ID.
+1. **Save a reusable procedure.** Choose **Reusable procedure / method**. Enter its name, version, type and technique, and provide instructions, a procedure document, or a retrievable reference. A meaningful method change needs a new version. A column-mapping version is separate. **SciSure protocols…** can select an exact published native version and prepare its CATALYST reference for review; it does not create or publish a native protocol.
+2. **Register the physical sample.** Choose **Sample information** and enter its readable label and description/composition. CATALYST generates a permanent sample ID. State/treatment, parent and notes are optional. An independently prepared sample gets its own ID; an unchanged sample reused across measurements keeps its existing ID. A derivative should get a new ID with an optional parent link explaining its origin.
+3. **Record a synthesis when relevant.** Choose **Synthesis execution**, select the product sample and saved synthesis procedure version, and enter the date and operator. Record run-specific deviations or supporting evidence. A characterization upload does not require a synthesis execution to be invented or re-entered.
+4. **Link each measurement.** Choose the measurement technique, search for the existing sample and method, then enter this run's date and operator and attach its files. Preserve original files by default. Method settings belong in the reusable method; unusual conditions or changes belong in run notes. For table conversion, map the source columns and units and supply the required numerical basis.
+5. **Add a missing definition without losing the draft.** Use **+ Add new sample** or **+ Add new procedure** beside a selector. Staging the new definition restores the unfinished draft with its new link selected. Queued definitions are labeled and must precede the data referencing them.
+6. **Review before sending.** Stage related records in **Batch review**, inspect each item, resolve errors, and approve each exact revision. Editing invalidates approval; changing a definition requires its dependents to be relinked and reviewed. Send approved records in order to the verified destination. A failed or uncertain transfer stops later records and requires inspection rather than a duplicate submission.
 
 ```mermaid
 flowchart LR
-    P["Shared synthesis procedure · version 2"] --> U["Rochester execution → UR batch"]
-    P --> N["Northwestern execution → NU batch"]
-    U --> US["UR physical sample"]
-    N --> NS["NU physical sample"]
-    US --> X["SLAC XAFS/XANES dataset · same sample ID"]
-    US --> A["A*STAR aliquot · new child ID, UR batch origin"]
-    A --> T["TPR/TPD/TPO or CO uptake dataset"]
-    US -. "explicit model–sample relationship" .-> V["VA Tech model → calculation dataset"]
+    P["Saved synthesis procedure · version 2"] --> U["Rochester synthesis execution"]
+    P --> N["Northwestern synthesis execution"]
+    U --> US["Registered UR sample"]
+    N --> NS["Registered NU sample"]
+    US --> X["SLAC XAFS/XANES run · same sample ID"]
+    M["Saved XAFS/XANES method"] --> X
+    US --> A["A*STAR derivative · new ID with parent"]
+    US -. "declared physical relationship" .-> V["VA Tech model → calculation"]
 ```
 
-This is an illustrative routing example, not an assignment of techniques or responsibilities to those labs.
+This is an illustrative routing example, not an assignment of techniques or responsibilities. Container/barcode labels and shipment records should retain the complete canonical sample ID alongside the readable local label. Barcode printing/scanning and current-location tracking are not implemented. Record transfer evidence in the appropriate notebook record or notes; the adaptive measurement form does not impose legacy custody and synthesis fields on every upload.
 
-## What an identifier means
+## What the form requires
 
-Generated IDs have the form `CAT-UR-SMP-<32 hexadecimal characters>`. The random suffix allows offline ID creation without relying on a lab counter or synchronized clocks. The prefix identifies the lab that created that record. Types are `BAT` (batch), `SYN` (synthesis execution), `SMP` (physical sample), `DS` (dataset), and `MDL` (computational model).
-
-An aliquot made at SLAC from a Rochester batch has a `CAT-SLAC-SMP-…` sample ID and a `CAT-UR-BAT-…` batch ID. The origin remains Rochester. A SLAC measurement of the unchanged Rochester sample keeps its `CAT-UR-SMP-…` ID and adds a `CAT-SLAC-DS-…` dataset ID. Do not shorten canonical IDs when linking records.
-
-Local labels are stored as exact `(lab, label, canonical ID)` aliases. The same label can refer to different samples, including repeated uses within one lab; the catalog shows separate IDs rather than merging matches. Select the canonical record explicitly. Different samples in one source table require separate submissions or an explicit reviewed split; the app blocks conflicting mapped sample labels.
-
-## Measurements and calculations
-
-| Data type | Required scientific context beyond identity |
+| Record | Required user-entered or selected information |
 | --- | --- |
-| Synthesis | Actual synthesis record, shared procedure/version/reference, date, deviations, material state, scale |
-| Reactor / pilot testing | Configuration, scale, temperature, absolute pressure, catalyst mass, interval, flow/composition basis, calibration |
-| XRD | Radiation/wavelength, geometry, calibration, signal basis, explicit 2θ or q axis/unit |
-| XAFS/XANES | Absorber and edge, detection mode, energy reference, calibration, signal basis, explicit energy/k/R axis/unit |
-| TPR / TPD / TPO | Pretreatment, gas composition, temperature/time program, flow basis, sample mass, detector units, calibration |
-| CO uptake | Pretreatment, adsorption temperature, uptake mass/gas basis, calibration, explicit CO:site assumption or `not calculated` |
-| Other spectroscopy | Technique, axis and signal units, calibration, method/version |
-| Computational | Model description and input structure, program/version, method/theory level, parameters, environment, convergence, quantity/unit/reference basis |
-| Imaging / sample photographs | Image type/technique, what is shown and acquisition conditions, scale/calibration reference or explicit non-quantitative status |
+| Sample information | Label and description/composition. IDs and lab attribution are supplied by the app. |
+| Reusable procedure / method | Name, version, type, technique, and instructions, an attached document, or an existing reference. |
+| Synthesis execution | Registered product sample, saved synthesis procedure version, date and operator. Files and deviations are optional. |
+| Characterization / measurement | Registered sample, saved matching method, date, operator and original files. Standardized conversion additionally requires the selected mapping and its numerical units/basis. |
+| Computational results | Saved computational method, model description, exact input-structure reference, date, operator and results. Linking physical samples is optional; a stated link needs its relationship and supporting basis. |
 
-These are contextual validation and explicit CSV/XLSX/flat-record JSON table-import paths. They do not perform phase identification, XAFS fitting, peak integration, dispersion calculations, or computational jobs. Native vendor files, images, PDFs, simulation structures and logs can be preserved as uninterpreted originals beside a table or in a files-and-context-only submission. Their scientific interpretation still requires separate readers and reviewed processing recipes. Images retain their original metadata and bytes; no image analysis or conversion runs. One submission's files share its declared subject, dataset, and context, so unrelated images/runs require separate submissions.
+The method should contain the settings needed to interpret and repeat that technique: for example XRD radiation/geometry, XAFS edge and detection mode, reaction conditions and calibration, image acquisition/scale information, or computational software/parameters. CATALYST does not require these settings to be copied into every original-file upload. A note or attached record should identify run-specific differences. Preserving the files does not establish scientific validity or verify that a method contains every scientifically necessary detail.
 
-A computational model has its own `MDL` identity and never needs an invented physical batch. Use `no physical link` for a theoretical model. Otherwise declare whether it represents, derives from, or is compared with named physical samples, and record the basis for that relationship. A model being compared to a sample is not evidence that it exactly represents that material. Configuration IDs and computed quantities can be mapped from output tables; units and reference bases must remain explicit. Materially changed model definitions require a new model ID.
+Standardized CSV, XLSX and flat-record JSON paths convert explicitly mapped fields and units. They do not perform phase identification, XAFS fitting, peak integration, dispersion calculations or computational jobs. Native instrument files, images, PDFs, structures and logs can be preserved unchanged. One record's files share its sample/model, method and run details. Use separate records for unrelated subjects or runs; **Batch files…** repeats the displayed details only after confirmation and still requires each record's review.
 
-## SciSure storage and boundaries
+## Identity and reuse
 
-The **Samples & models** catalog reads identity-bearing CATALYST packages across experiments in the token's active group. Search by full ID, batch ID, local alias, or origin lab. Use a selected identity for a new measurement/calculation, or create a linked derivative. Shared identity fields are copied; new acquisition fields are cleared and require review. Completed records can be referenced; incomplete transfers reserve their IDs but cannot establish a new parent/model link.
+Generated IDs have the form `CAT-UR-SMP-<32 hexadecimal characters>`. The suffix supports offline creation without a shared counter. `SMP` identifies a physical sample, `PRC` a versioned procedure, `SYN` a synthesis execution, `DS` a dataset/registration record, and `MDL` a computational model. Historical reviews may also contain `BAT` batch IDs. Do not shorten IDs when linking records.
 
-This version stores the graph in approved JSON attachments beside raw files and transfer receipts. It does not yet create native SciSure inventory Samples, bind submitted procedure references to native protocols, or populate native Used/Generated sample links. The new read-only setup inspector retrieves actual sample types/fields and can inspect an existing sample and exact protocol version. Completing native writes still needs explicit field bindings and tenant tests. Native Samples should ultimately represent physical materials/containers, protocols the shared procedures, and experiments the synthesis/measurement/calculation work. Computational models should remain distinguishable from physical inventory.
+A SLAC measurement of an unchanged Rochester sample keeps its `CAT-UR-SMP-…` ID and receives a new `CAT-SLAC-DS-…` dataset ID. Reprocessing the same acquisition creates a new review revision while retaining that dataset identity. A material change or independent preparation needs its own sample identity; a materially changed computational model needs a new model identity.
 
-Use one accessible consortium group for this first version. The catalog cannot validate links into another group, inaccessible experiments, native-only samples, or older CATALYST packages without structured identities. Publication fails rather than using a partial catalog when a read fails or the 250-review limit is exceeded. There is no additional local database, GitHub research store, or hosted proxy. Direct SciSure requests are explicit refresh/read/publish operations.
+Local labels are exact `(lab, label, canonical ID)` aliases. Duplicate names remain distinct choices; search results do not merge samples with similar labels. A later run links the original sample definition without rewriting its description or history. Selected sample and procedure definitions pin exact saved review IDs and checksums. Completed definitions and earlier valid queued definitions can be selected. Partial transfers cannot establish reusable definitions.
 
-Identity and profile checks are client-side and cannot provide an atomic global registry or enforce lab ownership against someone with independent API write access. Shared tokens share the account's permissions; lab and person declarations are self-reported. Individual SciSure tokens preserve each account's API attribution without adding a new sign-in service. Native SciSure permissions and signing remain authoritative.
+Computational models stay distinct from physical inventory. A theoretical model can have no physical link. Otherwise state whether it represents, derives from, or is compared with specified registered samples and provide the basis. Comparison alone is not evidence that a model exactly represents the material. Reference bases and units for numerical results remain explicit.
 
-Older reviews remain readable. Before republishing them, supply the new identity context; original aliases and corrections remain part of the historical record. Conflicting existing canonical definitions require owner review rather than automatic overwriting. Multi-parent material mixtures, full custody inventories, server-enforced uniqueness, and authenticated independent reviewer identities are outside this release.
+## SciSure storage and native inventory
+
+Every approved record is stored as a CATALYST experiment package with its context, relationships, approval, originals when present, and verified completion receipt. **Samples & models** and the searchable selectors read completed packages visible in the token's active group. The application adds no local research database or hosted proxy.
+
+Native inventory is an explicit additional choice for eligible sample and physical-work records. Review the native plan before sending: it identifies the exact sample to reuse or create and the Used/Generated relationship to add. The minimal **CATALYST Material v2** type stores stable sample metadata only: canonical ID, creating lab, description/composition, schema version, and optional state/parent. It does not repeat synthesis dates, methods, acquisition settings or operator fields on every sample. See [configuration and migration](scisure-configuration.md).
+
+Existing Material v1 types, fields and research samples are not rewritten during v2 setup. Existing native samples can be selected and verified for reuse instead of duplicated. Native configuration, sample access, file upload and relationship changes depend on the connected account's permissions. A successful read-only inspection does not establish write permission. Native protocol selection keeps its exact published-version reference; it does not publish a new native protocol or turn every attached method document into one.
+
+The catalog is bounded to 250 completed/pending CATALYST reviews visible in the active group; native selectors have their own bounded reads. Inaccessible records and cross-group package links cannot be validated. API pagination permits up to 1,000 results per page, while CATALYST separately caps a loaded list at 1,000 total records. An incomplete read or exceeded application limit stops the operation rather than silently omitting records.
+
+## Review and operating boundaries
+
+Review, field validation, source hashes and read-back verification are client-side integrity checks. They are not an atomic global registry, proof of lab ownership or an authenticated electronic signature. Shared API tokens use the same SciSure account permissions and identity; reviewer names entered in CATALYST are self-reported. SciSure signing and account permissions remain authoritative.
+
+Connection setup follows the supplied eLabNext REST API Quick Start Guide: create a token on the intended server in **Apps & Connections → Manage Authentication**, including after SSO/SAML or two-factor sign-in, then paste only the token into CATALYST. The app handles the authentication header and bounded pagination.
+
+Keep the app open during a transfer and inspect uncertain results before retrying. Writes to sections, inventory and sample relationships are not a transaction. A crash, unknown write response, external editing or permission change can require owner reconciliation in SciSure. Historical reviews remain readable under their original rules; a new adaptive record does not silently relax or rewrite a saved legacy approval. Multi-parent mixtures, full custody inventories, server-enforced uniqueness and independent reviewer authentication remain outside this implementation. No authenticated live tenant verification is claimed; current API behavior is exercised with synthetic fixtures.

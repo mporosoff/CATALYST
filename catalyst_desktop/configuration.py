@@ -1,56 +1,53 @@
 """Versioned native SciSure configuration, discovery, and additive schema setup."""
 from .model import InputError, encode, digest
 from .scisure import SciSureError, remote_id
-from .traceability import LABS, MATERIAL_KINDS, lab_name
+from .traceability import LABS, lab_id, lab_name, identity_lab
 
-FORMAT = 'catalyst-scisure-configuration/1'
-TYPE_NAME = 'CATALYST Material v1'
-MARKER = '[CATALYST schema catalyst-scisure-configuration/1]'
+FORMAT = 'catalyst-scisure-configuration/2'
+TYPE_NAME = 'CATALYST Material v2'
+MARKER = '[CATALYST schema catalyst-scisure-configuration/2]'
+LEGACY_TYPE_NAME = 'CATALYST Material v1'
+LEGACY_MARKER = '[CATALYST schema catalyst-scisure-configuration/1]'
+MIGRATION_GUIDANCE = (
+    'Version 2 is a separate sample type for new registrations. Existing version 1 types, '
+    'fields and samples remain unchanged; no conversion or duplicate sample creation is performed. '
+    'Keep existing sample IDs and reuse verified existing inventory records. Synthesis executions '
+    'and procedure versions remain linked experiment records, rather than required sample fields.'
+)
 
 
 def material_fields():
     """Keep only stable material facts here; acquisition/results belong to experiments."""
     definitions = [
         ('catalyst_sample_id', 'TEXT', True, 'material.id', 'Immutable consortium sample ID; also stored in native altID.'),
-        ('catalyst_batch_id', 'TEXT', True, 'batch.id', 'Independent synthesis batch; shared by its aliquots.'),
-        ('origin_lab', 'COMBO', True, 'batch.origin_lab', 'Lab that synthesized the original batch.'),
         ('sample_created_lab', 'COMBO', True, 'material.creator_lab', 'Lab that created this container/aliquot/treated sample.'),
-        ('origin_batch_label', 'TEXT', True, 'batch.local_id', 'Origin laboratory batch label; not a unique consortium identifier.'),
-        ('material_kind', 'COMBO', True, 'material.kind', 'Batch material, aliquot, or treated material.'),
-        ('material_state', 'TEXTAREA', True, 'material.state', 'State/treatment defining this material identity.'),
+        ('sample_description', 'TEXTAREA', True, 'material.description', 'Researcher-supplied sample description or composition; no synthesis history is required.'),
+        ('material_state', 'TEXTAREA', False, 'material.state', 'Optional physical state or treatment defining this material.'),
         ('parent_catalyst_sample_id', 'TEXT', False, 'material.parent_sample_id', 'Canonical parent; native parentSampleID must reference its resolved SciSure sample.'),
-        ('shared_procedure_id', 'TEXT', True, 'batch.procedure.id', 'Consortium shared synthesis procedure identifier.'),
-        ('shared_procedure_version', 'TEXT', True, 'batch.procedure.version', 'Exact procedure version; independent of mapping/software versions.'),
-        ('shared_procedure_reference', 'TEXTAREA', True, 'batch.procedure.reference', 'Published native protocol version or exact shared procedure document reference.'),
-        ('synthesis_execution_id', 'TEXT', True, 'batch.synthesis_execution.id', 'The particular laboratory execution that made this batch.'),
-        ('synthesis_date_iso', 'TEXT', True, 'batch.synthesis_execution.performed_at', 'YYYY-MM-DD calendar date. Text deliberately preserves date-only precision without UTC conversion.'),
-        ('synthesis_record', 'TEXTAREA', True, 'batch.synthesis_execution.record', 'Actual synthesis execution/ELN record, not just the shared SOP.'),
-        ('synthesis_deviations', 'TEXTAREA', True, 'batch.synthesis_execution.deviations', 'Actual deviations, including explicit none.'),
         ('catalyst_schema_version', 'TEXT', True, None, 'Native material binding schema version.'),
     ]
     fields = []
     for key, datatype, required, source, notes in definitions:
         field = dict(key=key, sampleDataType=datatype, required=required, notes=notes)
-        if key in ('origin_lab', 'sample_created_lab'):
+        if key == 'sample_created_lab':
             field['optionValues'] = [label for _, label in LABS.values()]
-        elif key == 'material_kind':
-            field['optionValues'] = list(MATERIAL_KINDS)
         fields.append(dict(definition=field, source=source,
-            encoding='lab_display_name' if key in ('origin_lab', 'sample_created_lab') else 'text',
-            constant='1' if source is None else None))
+            encoding='lab_display_name' if key == 'sample_created_lab' else 'text',
+            constant='2' if source is None else None))
     return fields
 
 
 def configuration_document():
-    return dict(format=FORMAT, version=1, expected_group_name='CATALYST',
+    return dict(format=FORMAT, version=2, expected_group_name='CATALYST',
         sample_type=dict(name=TYPE_NAME, description=MARKER + ' Physical catalyst materials, aliquots and treated specimens. '
-            'Acquisition data and processing results belong to linked experiments. No default stock mass is assigned.',
+            'Register the sample once; synthesis executions, methods, acquisition data and processing results '
+            'belong to linked experiments. No default stock mass is assigned.',
             quantityRequired=False, defaultQuantityType='Mass', defaultUnit='MilliGram',
             thresholdEnabled=False, defaultThresholdAction='Nothing'),
         fields=material_fields(),
         structure=dict(project='CATALYST', studies=[label for _, label in LABS.values()],
-            study_basis='Acquisition/executing lab; origin lab is a separate sample field.',
-            experiment_basis='One synthesis execution or measurement/calculation acquisition; revisions remain with that work.',
+            study_basis='Acquisition/executing lab; sample owner is stored with the sample definition.',
+            experiment_basis='One sample registration, procedure definition, synthesis execution or measurement/calculation acquisition; revisions remain with that work.',
             autoCollaborate=True, approval_policy='Preserve the existing project/study signing and approval policy.',
             protocols='Shared scientific procedure plus exact published protVersionID; never invent procedure content.',
             computational_models='ELN records and versioned model manifests, not physical inventory Samples.'),
@@ -63,8 +60,10 @@ def configuration_document():
             image_handling='Original file attachment; optional IMAGE sections may supplement but never replace originals.',
             quantity='Optional inventory balance, entered separately; never infer stock mass from reactor loading.',
             native_ids='Discover from this tenant and record in memory/remote publication receipts; never hard-code example IDs.'),
-        installation_scope='Creates only the dedicated material sample type and missing metadata fields. '
-            'Does not create samples, projects, studies, protocols, sign records, or change permissions.')
+        migration=dict(from_sample_type=LEGACY_TYPE_NAME, strategy='additive', guidance=MIGRATION_GUIDANCE),
+        installation_scope='Creates only the dedicated version 2 material sample type and missing metadata fields. '
+            'Does not modify version 1 or unrelated types, create samples, projects, studies or protocols, '
+            'sign records, or change permissions.')
 
 
 def _workspace(client, group_id):
@@ -77,7 +76,7 @@ def _workspace(client, group_id):
     return dict(tenant=client.origin, group_id=remote_id(group_id), group_name=name)
 
 
-def _type(client):
+def _sample_types(client):
     # Search active and archived types; an archived collision must not be silently recreated.
     records = {}
     for path in ('/api/v1/sampleTypes', '/api/v1/sampleTypes?archived=true'):
@@ -86,7 +85,12 @@ def _type(client):
             if sid in records and records[sid] != item:
                 raise SciSureError('Sample type discovery changed between reads. Refresh before configuration.')
             records[sid] = item
-    matches = [t for t in records.values() if str(t.get('name') or '').casefold() == TYPE_NAME.casefold()]
+    return list(records.values())
+
+
+def _type(client, records=None):
+    records = _sample_types(client) if records is None else records
+    matches = [t for t in records if str(t.get('name') or '').casefold() == TYPE_NAME.casefold()]
     if len(matches) > 1:
         raise InputError('Duplicate CATALYST material types exist. Resolve their identity in SciSure before configuration.')
     if not matches:
@@ -96,6 +100,24 @@ def _type(client):
     if detail.get('sampleTypeID') != sid:
         raise SciSureError('SciSure returned a different sample type than requested. Configuration is paused.')
     return detail
+
+
+def _legacy_types(client, records, group_id):
+    """Discover prior installations without modifying or adopting their stricter schema."""
+    legacy = []
+    for record in records:
+        if str(record.get('name') or '').casefold() != LEGACY_TYPE_NAME.casefold():
+            continue
+        sid = remote_id(record.get('sampleTypeID'))
+        detail = client.object(f'/api/v1/sampleTypes/{sid}')
+        if detail.get('sampleTypeID') != sid:
+            raise SciSureError('SciSure returned a different legacy sample type than requested. Configuration is paused.')
+        compatible = (detail.get('groupID') == group_id and detail.get('deleted') is False
+            and LEGACY_MARKER in str(detail.get('description') or '')
+            and str(detail.get('name') or '').casefold() == LEGACY_TYPE_NAME.casefold())
+        legacy.append(dict(sample_type_id=sid, name=detail.get('name'),
+            archived=detail.get('deleted') is not False, compatible_identity=compatible))
+    return sorted(legacy, key=lambda item: item['sample_type_id'])
 
 
 def _type_conflicts(actual, group_id):
@@ -129,10 +151,12 @@ def _field_conflicts(actual, expected):
 def plan_configuration(client, group_id):
     workspace = _workspace(client, group_id)
     document = configuration_document()
+    records = _sample_types(client)
     result = dict(format='catalyst-scisure-setup-plan/1', workspace=workspace,
         configuration_sha256=digest(encode(document)), actions=[], conflicts=[],
-        sample_type_id=None, field_bindings={}, scope=document['installation_scope'])
-    actual = _type(client)
+        sample_type_id=None, field_bindings={}, scope=document['installation_scope'],
+        legacy_sample_types=_legacy_types(client, records, group_id), migration=MIGRATION_GUIDANCE)
+    actual = _type(client, records)
     if actual is None:
         result['actions'].append(dict(kind='create_sample_type', body=document['sample_type']))
         fields = []
@@ -166,7 +190,7 @@ def plan_configuration(client, group_id):
 
 
 def configuration_summary(plan):
-    lines = ['CATALYST material schema v1',
+    lines = ['CATALYST material schema v2',
         f'Tenant: {plan["workspace"]["tenant"]}',
         f'Group: {plan["workspace"]["group_name"]} ({plan["workspace"]["group_id"]})', '', plan['scope'], '']
     if plan['conflicts']:
@@ -179,9 +203,13 @@ def configuration_summary(plan):
             body = action['body']
             lines.append('Create sample type: ' + body['name'] if action['kind'] == 'create_sample_type' else
                 f'Add {body["key"]} ({body["sampleDataType"]}; {"required" if body["required"] else "optional"})')
+    lines.extend(['', 'Migration: ' + plan.get('migration', MIGRATION_GUIDANCE)])
+    for legacy in plan.get('legacy_sample_types', []):
+        status = 'existing records can be reused after sample verification' if legacy['compatible_identity'] else 'archived or unverified; manual review needed'
+        lines.append(f'Existing {legacy["name"]} (type {legacy["sample_type_id"]}): {status}. Left unchanged.')
     lines.extend(['', 'Existing verified field bindings:'])
     lines.extend(f'{key}: {value}' for key, value in plan['field_bindings'].items())
-    lines.extend(['', 'Native sample publication and Used/Generated links are a separate step; installing this schema does not enable them.'])
+    lines.extend(['', 'Installing this schema does not upload research data. Native sample registration and experiment links require their own reviewed submission.'])
     return '\n'.join(lines)
 
 
@@ -260,13 +288,32 @@ def material_payload(trace, plan, *, parent_sample=None):
     """Build a native create payload from a verified binding; this function performs no writes."""
     if not plan.get('ready') or plan.get('conflicts') or plan.get('configuration_sha256') != digest(encode(configuration_document())):
         raise InputError('Use the verified CATALYST material schema before preparing native sample data.')
-    if 'material' not in trace or 'batch' not in trace:
+    material = trace.get('material')
+    if not isinstance(material, dict):
         raise InputError('Computational models are not physical inventory samples.')
-    parent = trace['material'].get('parent_sample_id')
+    sid = material.get('id')
+    if not isinstance(sid, str):
+        raise InputError('Use the canonical sample ID from the reviewed sample definition.')
+    if identity_lab(sid, 'SMP') != lab_id(material.get('creator_lab')):
+        raise InputError('The canonical sample ID and creating lab must agree.')
+    description = material.get('description')
+    if not isinstance(description, str) or not description.strip():
+        raise InputError('A sample description / composition is required for native registration. '
+            'Add it to the sample definition; synthesis history does not supply a sample description.')
+    parent = material.get('parent_sample_id')
+    if parent:
+        if not isinstance(parent, str):
+            raise InputError('Use the canonical parent sample ID from the reviewed sample definition.')
+        identity_lab(parent, 'SMP')
+        if parent == sid:
+            raise InputError('A sample cannot be its own parent.')
     if bool(parent) != (parent_sample is not None):
         raise InputError('Resolve the declared canonical parent to its verified native sample ID first.')
+    compatible_types = {plan['sample_type_id']} | {
+        item['sample_type_id'] for item in plan.get('legacy_sample_types', [])
+        if item.get('compatible_identity') and not item.get('archived')}
     if parent_sample is not None and (parent_sample.get('altID') != parent or parent_sample.get('archived') is not False
-            or parent_sample.get('sampleTypeID') != plan['sample_type_id']):
+            or parent_sample.get('sampleTypeID') not in compatible_types):
         raise InputError('The native parent is archived or does not match the declared canonical material/type.')
     metas = []
     for field in material_fields():
@@ -277,16 +324,24 @@ def material_payload(trace, plan, *, parent_sample=None):
             for key in field['source'].split('.'):
                 value = value.get(key) if isinstance(value, dict) else None
         definition = field['definition']
-        if value in (None, ''):
+        if value is None or (isinstance(value, str) and not value.strip()):
             if definition['required']: raise InputError('Required material field is missing: ' + definition['key'])
             continue
+        if not isinstance(value, str):
+            raise InputError('Material field must be text: ' + definition['key'])
         if field['encoding'] == 'lab_display_name': value = lab_name(value)
         if definition.get('optionValues') and value not in definition['optionValues']:
             raise InputError('Unsupported controlled material value: ' + definition['key'])
+        if definition['key'] not in plan.get('field_bindings', {}):
+            raise InputError('Verify the native metadata binding before registration: ' + definition['key'])
         metas.append(dict(key=definition['key'], sampleDataType=definition['sampleDataType'],
             sampleTypeMetaID=remote_id(plan['field_bindings'][definition['key']]), value=str(value)))
-    sid = trace['material']['id']
-    result = dict(sampleTypeID=remote_id(plan['sample_type_id']), name=sid, altID=sid, sampleMetas=metas,
-        description='CATALYST material identity; acquisition data remain in linked experiment records.')
+    aliases = [alias for alias in trace.get('aliases', []) if isinstance(alias, dict)
+        and alias.get('canonical_id') == sid and isinstance(alias.get('local_label'), str)
+        and alias['local_label'].strip()]
+    aliases.sort(key=lambda alias: alias.get('lab') != material['creator_lab'])
+    name = aliases[0]['local_label'].strip() if aliases else sid
+    result = dict(sampleTypeID=remote_id(plan['sample_type_id']), name=name, altID=sid, sampleMetas=metas,
+        description=description)
     if parent_sample is not None: result['parentSampleID'] = remote_id(parent_sample.get('sampleID'))
     return result
