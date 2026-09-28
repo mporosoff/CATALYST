@@ -670,9 +670,9 @@ class SamplePage(Page):
         derive.pack(side='left')
         self.record_buttons = [upload, ship, derive]
         ttk.Button(self.actions, text='Refresh', command=self.reload).pack(side='right')
-        more = ttk.Menubutton(self.actions, text='Fix a mistake ▾')
+        more = ttk.Menubutton(self.actions, text='Edit ▾')
         menu = tk.Menu(more, tearoff=0)
-        menu.add_command(label='Correct this sample\'s details…', command=self.correct_sample)
+        menu.add_command(label='Edit this sample\'s details…', command=self.correct_sample)
         menu.add_command(label='Registered in error (retire this ID)…', command=self.retire_sample)
         menu.add_separator()
         menu.add_command(label='History of corrections', command=lambda: self.history(self.app.current.get('record')))
@@ -700,9 +700,9 @@ class SamplePage(Page):
         ttk.Label(head, text='Data from every lab', style='Sub.TLabel').pack(side='left')
         ttk.Button(head, text='Download files', command=self.download_data).pack(side='right')
         ttk.Button(head, text='Details', command=self.details).pack(side='right', padx=6)
-        fix = ttk.Menubutton(head, text='Fix ▾')
+        fix = ttk.Menubutton(head, text='Edit ▾')
         menu = tk.Menu(fix, tearoff=0)
-        menu.add_command(label='Correct this record…', command=self.correct_data)
+        menu.add_command(label='Edit this record…', command=self.correct_data)
         menu.add_command(label='Withdraw this record…', command=self.withdraw_data)
         menu.add_command(label='History of corrections', command=lambda: self.history((self.selected_data() or {}).get('record')))
         menu.add_command(label='Restore a withdrawn record (coordinator)…', command=self.restore_data)
@@ -1056,11 +1056,11 @@ class CorrectionDialog(tk.Toplevel):
         self.kind = record['kind']
         self.procedure = None
         self._pending = None
-        self.title(f"Correct {record['id']}")
+        self.title(f"Edit {record['id']}")
         self.configure(background='white', padx=22, pady=18)
         self.transient(app.root)
         self.geometry('900x720')
-        ttk.Label(self, text=f"Correct {record['id']}", style='ID.TLabel').pack(anchor='w')
+        ttk.Label(self, text=f"Edit {record['id']}", style='ID.TLabel').pack(anchor='w')
         ttk.Label(self, text=LOCKED[self.kind], style='Hint.TLabel', wraplength=840, justify='left').pack(anchor='w', pady=(2, 8))
         buttons = ttk.Frame(self)
         buttons.pack(side='bottom', fill='x', pady=(12, 0))
@@ -2049,7 +2049,7 @@ class ProceduresPage(Page):
         ttk.Button(buttons, text='Make a sample with this', style='Primary.TButton', command=self.make_sample).pack(side='left')
         ttk.Button(buttons, text='Save a new version', command=self.new_version).pack(side='left', padx=6)
         ttk.Button(buttons, text='Download documents', command=self.download).pack(side='left')
-        ttk.Button(buttons, text='Correct this version…', command=self.correct).pack(side='left', padx=6)
+        ttk.Button(buttons, text='Edit this version…', command=self.correct).pack(side='left', padx=6)
         ttk.Button(buttons, text='History', command=self.history).pack(side='left')
         buttons.pack_configure(anchor='w')
         self.details = ScrollFrame(right.body)
@@ -2628,8 +2628,8 @@ class HelpPage(Page):
             'Only typed text and file locations are kept, not the files themselves.'),
         ('Procedures', 'A procedure is the shared master recipe. Improve it with "Save a new version"; samples always '
             'record which version they followed.'),
-        ('Fix a mistake', 'Open the sample → "Fix a mistake" to correct its details, or, if the ID itself is wrong, mark '
-            'it "Registered in error" and register it again. For data, select the record → "Fix" → correct it (replace '
+        ('Edit a record', 'Open the sample → "Edit" to change its details, or, if the ID itself is wrong, mark '
+            'it "Registered in error" and register it again. For data, select the record → "Edit" → change it (replace '
             'a wrong file) or withdraw it. Every correction needs a reason and earlier versions are kept. Your lab '
             'corrects its own records; the coordinator can correct any.'),
         ('For AI and analysis', 'Export & AI access → Export a dataset, or connect an AI assistant with the read-only '

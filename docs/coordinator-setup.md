@@ -57,7 +57,7 @@ Rules the app follows:
 - **Revisions:** a corrected record is saved as a new revision in the same section: `catalyst-record.json` is revision 1, then `catalyst-record-r2.json`, `-r3.json` and so on. The latest one counts, and each revision carries the full history. Replaced files stay in the section, listed as superseded. Nothing is ever deleted.
 - **Sample list:** the list is built from experiment names, which don't change. So each sample correction also adds a line to the experiment **CATALYST corrections log** in the Samples study. Don't rename or delete it. If a correction's log line couldn't be written, the app says so; **Repair readable copies and the sample list** adds it later.
 - **Who may correct:** the lab that saved a record, or the coordinator. Tick **Settings → Coordinator tools → I am the CATALYST coordinator** on your own computer only. This setting prevents honest mistakes but is not a security control: every lab account has edit rights in SciSure. Each revision records who made it, and **History of corrections** shows it.
-- **Undo:** only the coordinator can restore a withdrawn data record or a sample registered in error (in the Fix menus). The restore is recorded in the history too.
+- **Undo:** only the coordinator can restore a withdrawn data record or a sample registered in error (in the Edit menus). The restore is recorded in the history too.
 - **Wrong IDs:** a sample ID is never edited or reused. The wrong one is marked *registered in error* and linked to the correct sample.
 
 ## What changed from 0.11
