@@ -73,8 +73,19 @@ A test protocol is the shared set of standard testing conditions, such as Northw
 
 When you add one of these files to an upload, CATALYST reads it and fills in the form. Check what it filled in. It only fills empty fields, and when a file disagrees with a value you already have, it tells you. The original file is always stored unchanged.
 
-- **Northwestern GC analysis workbook (.xlsx):** reads the catalyst mass, gas flows, pressure, GC method and each injection. It then calculates CO₂ conversion and product selectivity the same way for every lab (on a carbon basis), shows them next to the workbook's own values, and adds a results table (`… - CATALYST results.csv`) to the record.
-- **SLAC (SSRL) raw EXAFS scan (.txt):** reads the scan name, date, edge, monochromator and energy range. Absorption μ(E) isn't calculated yet, because SLAC still has to confirm which detector channel is which.
+- **Northwestern GC analysis workbook (.xlsx):** reads the catalyst mass, gas flows, pressure, GC method and each injection. It follows the template's own layout: the reference injections before reaction (rows 5–7, averaged in row 8) give the feed, and the unlabeled column V is unreacted CO₂. The product column labelled "CO2" is read as CO. For each injection CATALYST calculates:
+  - CO₂ conversion = (feed CO₂ − CO₂ out) / feed CO₂, as the template does
+  - H₂ conversion from the H₂ peak area against the reference injections
+  - carbon balance
+  - carbon-basis selectivity (DME counts two carbons)
+
+  The record shows the average of the last three injections. A results table (`… - CATALYST results.csv`) with every injection, and the workbook's own values beside CATALYST's, is added to the record.
+- **SLAC (SSRL) raw EXAFS scan (.txt):** reads the scan name, date, edge, monochromator and energy range, and calculates μ(E) into `… - CATALYST mu(E).csv`:
+  - sample, transmission: ln(ADC_01/ADC_02) = ln(I0/I1)
+  - reference foil: ln(ADC_02/ADC_03) = ln(I1/I2)
+  - fluorescence: ADC_04/ADC_01 = If/I0
+
+  It also reports the edge position (steepest rise) for each, as a quick check. The reference-foil edge should match the element's tabulated edge.
 
 ## Analysis results (fits, wavelet transforms, figures)
 

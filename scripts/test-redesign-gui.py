@@ -267,15 +267,14 @@ def main():
         try:
             fix = appmod.CorrectionDialog(app, saved['record'], app.current['sample']['experiment_id'], saved, app.pages['sample'].reload)
             fix.supersede['NU run.xlsx'].set(True)
-            fix.files.items = [FileItem(name='NU run.xlsx', content=nu_workbook(injections=((80, 2, 0, 10),)))]; fix.files.render()
+            fix.files.items = [FileItem(name='NU run.xlsx', content=nu_workbook(injections=((3, 1, 0, 10, 80, 4000),)))]; fix.files.render()
             appmod.set_text(fix.reason, 'Wrong workbook.')
             fix.preview()
             assert previews[-1]['problems'] == [], previews[-1]
         finally:
             appmod.PreviewDialog = real_preview
         saved = next(d for d in app.current['data'] if d['id'] == saved['id'])
-        assert saved['record']['results']['co2_conversion_pct'] == round(100 * 14 / 94, 4) or \
-            abs(saved['record']['results']['co2_conversion_pct'] - 100 * 14 / 94) < 1e-3, saved['record']['results']
+        assert abs(saved['record']['results']['co2_conversion_pct'] - 20) < 1e-6, saved['record']['results']
         current = [f['name'] for f in saved['record']['files']]
         assert 'NU run - CATALYST results.csv' in saved['record']['superseded_files'], saved['record']
         assert current == ['NU run (r2).xlsx', 'NU run - CATALYST results (r2).csv'], current
@@ -283,7 +282,7 @@ def main():
         assert saved['record']['extracted'][-1]['derived_files'] == ['NU run - CATALYST results (r2).csv'], saved['record']['extracted']
         # A SLAC scan fills in the XAS form; a later analysis is linked to it.
         scan = Path(folder) / 'Re_L-3_EXAFS_0009.txt'
-        scan.write_bytes(ssrl_scan())
+        scan.write_bytes(ssrl_scan(points=40))
         app.show('upload', sample=app.current['sample'])
         upload.files.add([str(scan)])
         assert upload.technique.get() == appmod.ids.TECHNIQUES['XAS'] and upload.condition_widgets['edge'].get() == 'Re L3-edge'
@@ -291,6 +290,8 @@ def main():
         assert upload.when.get() == '2025-07-19'
         upload.save()
         raw = next(d for d in app.current['data'] if d['technique'] == 'XAS' and d['record'].get('extracted'))
+        assert [f['name'] for f in raw['record']['files']] == ['Re_L-3_EXAFS_0009.txt', 'Re_L-3_EXAFS_0009 - CATALYST mu(E).csv']
+        assert raw['record']['results']['edge_reference_eV'], raw['record']['results']
         app.show('upload', sample=app.current['sample'])
         upload.technique.set(appmod.ids.TECHNIQUES['XAS']); upload.technique_changed()
         upload.analysis_of.set(raw['id'])

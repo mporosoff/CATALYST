@@ -1347,12 +1347,11 @@ class CorrectionDialog(tk.Toplevel):
                 found = None
             if not found:
                 continue
-            made = []
             if found.get('results') and not record.get('results'):
                 record['results'] = dict(found['results'], source_file=item.name)
-                made = [FileItem(name=f"{Path(item.name).stem} - {d['suffix']}", content=d['content'])
-                    for d in found.get('derived') or []]
-                extra += made
+            made = [FileItem(name=f"{Path(item.name).stem} - {d['suffix']}", content=d['content'])
+                for d in found.get('derived') or []]
+            extra += made
             record['extracted'] = record['extracted'] + [dict(file=item.name, reader=found['reader'], label=found['label'],
                 metadata=found.get('metadata') or {}, warnings=found.get('warnings') or [], derived_files=[i.name for i in made])]
         taken = {i.name for i in new_files}
@@ -2086,10 +2085,9 @@ class UploadForm(Page):
 
     def derived_items(self):
         chosen = {i.name for i in self.files.items}
-        first = next((name for name, result in self.found if result.get('results')), None)
         return [FileItem(name=self.derived_name(name, item), content=item['content'])
-            for name, result in self.found if name == first or not result.get('results')
-            for item in result.get('derived') or [] if self.derived_name(name, item) not in chosen]
+            for name, result in self.found for item in result.get('derived') or []
+            if self.derived_name(name, item) not in chosen]
 
     def values(self):
         return dict(sample=self.sample.get_value() or '', technique=self.technique.get(), date=self.when.get(),
@@ -2204,7 +2202,8 @@ class UploadForm(Page):
         for name, found in self.found:
             warnings = list(found.get('warnings') or [])
             if found.get('results') and results:
-                warnings.append('Only the first workbook in a record is calculated. Upload other runs as their own records.')
+                warnings.append('The record\'s summary results come from the first file; this file\'s full results are '
+                    'in its own CATALYST table. Upload separate runs as their own records.')
             elif found.get('results'):
                 results = dict(found['results'], source_file=name)
             extracted.append(dict(file=name, reader=found['reader'], label=found['label'],
@@ -2946,8 +2945,8 @@ class HelpPage(Page):
             'TST-NU-001). Fill it in from a Word document with "Fill in from a document". When uploading reactor data, '
             'pick the protocol: its conditions fill in, and what your run did differently is recorded.'),
         ('Files the app reads', 'Adding a Northwestern GC workbook or a SLAC raw EXAFS scan to an upload fills in the '
-            'form for you. GC workbooks also get CO2 conversion and selectivity calculated the same way for every lab. '
-            'The original files are stored unchanged.'),
+            'form for you. GC workbooks get CO2 and H2 conversion, carbon balance and selectivity; SLAC scans get μ(E) '
+            '(transmission, reference foil, fluorescence). The original files are stored unchanged.'),
         ('Edit a record', 'Open the sample → "Edit" to change its details, or, if the ID itself is wrong, mark '
             'it "Registered in error" and register it again. For data, select the record → "Edit" → change it (replace '
             'a wrong file) or withdraw it. Every correction needs a reason and earlier versions are kept. Your lab '

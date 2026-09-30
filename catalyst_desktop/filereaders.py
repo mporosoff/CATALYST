@@ -4,9 +4,11 @@ Every reader is conservative: it only reports what it can find, the original fil
 and anything it could not interpret is listed as a warning rather than guessed.
 
 Readers
-  ssrl-qexafs     SSRL (SLAC) QEXAFS raw scan (.txt): header and energy range. μ(E) waits for a confirmed channel map.
-  nu-gc-workbook  Northwestern GC analysis workbook (.xlsx): reactor setup, injections, CATALYST-standard
-                  carbon-based CO2 conversion and product selectivity (alongside the lab's own values).
+  ssrl-qexafs     SSRL (SLAC) QEXAFS raw scan (.txt): header, energy range, and μ(E) in transmission, reference foil
+                  and fluorescence (channel map confirmed by SLAC via Marc, 2026-09-30).
+  nu-gc-workbook  Northwestern GC analysis workbook (.xlsx): reactor setup, injections, CO2 conversion against the
+                  reference injections, carbon balance, carbon-basis selectivity (alongside the lab's own values).
+                  The column labelled CO2 among the products is CO (correction from Marc, 2026-09-30).
   test-protocol   A standard testing-conditions document (.docx tables) -> test protocol fields.
 """
 from __future__ import annotations
@@ -19,9 +21,10 @@ from datetime import datetime
 from xml.etree import ElementTree as ET
 
 MAX_BYTES = 20 * 1024 * 1024
-CALCULATION = ('Carbon basis, from the product amounts in the workbook: selectivity S_i = c_i·n_i / Σ c_j·n_j; '
-    'CO2 conversion X = Σ c_j·n_j / (n_CO2 + Σ c_j·n_j), where c = carbon atoms per molecule and n = amount (µmol). '
-    'Assumes the carbon balance closes and CO2 is the only carbon feed.')
+CALCULATION = ('CO2 conversion X = (n_CO2,feed − n_CO2,out) / n_CO2,feed, with n_CO2,feed the average of the reference '
+    'injections before reaction (as in the workbook). Selectivity on a carbon basis: S_i = c_i·n_i / Σ c_j·n_j over the '
+    'carbon products (c = carbon atoms: CO 1, CH3OCH3 2, CH2O 1, CH3OH 1). Carbon balance = (n_CO2,out + Σ c_j·n_j) / '
+    'n_CO2,feed. H2 conversion from the H2 peak area relative to the reference injections. n = amount in µmol.')
 
 
 class Found(dict):
@@ -91,11 +94,87 @@ def read_ssrl_qexafs(name, content):
         'Monochromator': crystal or (f'lattice spacing {lattice} Å' if lattice else ''),
         'Points': len(rows), 'Energy range (eV)': f'{min(energies):.1f}–{max(energies):.1f}',
         'Detector channels': ', '.join(detectors)}
-    return Found(reader='ssrl-qexafs/1', label='SSRL QEXAFS raw scan', technique='XAS', date=created,
+    channels = {name: columns.index(name) if name in columns else None for name in ('ADC_01', 'ADC_02', 'ADC_03', 'ADC_04')}
+    warnings, results, derived = [], {}, []
+    if all(i is not None for i in channels.values()):
+        spectrum, skipped = mu_spectrum(rows, energy_index, channels)
+        if skipped:
+            warnings.append(f'{skipped} point(s) had a zero or negative detector reading and were left out of μ(E).')
+        if spectrum:
+            results = dict(points=len(spectrum), channel_map=CHANNEL_MAP, calculation=MU_CALCULATION)
+            for key, label in (('mu_transmission', 'edge_transmission_eV'), ('mu_reference', 'edge_reference_eV'),
+                    ('mu_fluorescence', 'edge_fluorescence_eV')):
+                e0 = edge_position(spectrum, key)
+                if e0 is not None:
+                    results[label] = round(e0, 1)
+            out = io.StringIO()
+            writer = csv.writer(out, lineterminator='\n')
+            writer.writerow(['energy_eV', 'mu_transmission', 'mu_reference', 'mu_fluorescence'])
+            for point in spectrum:
+                writer.writerow([f"{point['energy']:.4f}"] + ['' if point[k] is None else f'{point[k]:.6g}'
+                    for k in ('mu_transmission', 'mu_reference', 'mu_fluorescence')])
+            derived.append(dict(suffix='CATALYST mu(E).csv', content=out.getvalue().encode('utf-8'),
+                description='μ(E) in transmission, reference foil and fluorescence'))
+    else:
+        warnings.append('μ(E) was not calculated: the file does not have the ADC_01–ADC_04 channels.')
+    return Found(reader='ssrl-qexafs/2', label='SSRL QEXAFS raw scan', technique='XAS', date=created,
         title=' '.join(x for x in (header.get('Scan Name'), f'{element} {edge}' if element else '', scan_type) if x),
-        conditions=conditions, metadata={k: v for k, v in metadata.items() if v not in ('', None)}, results={},
-        derived=[], warnings=['μ(E) was not calculated: which detector channel is I0, It, Iref or fluorescence has '
-            'not been confirmed by SLAC yet. The raw file is stored unchanged.'])
+        conditions=conditions, metadata={k: v for k, v in metadata.items() if v not in ('', None)}, results=results,
+        derived=derived, warnings=warnings)
+
+
+CHANNEL_MAP = 'ADC_01 = I0 (incident), ADC_02 = I1 (after sample), ADC_03 = I2 (after reference foil), ADC_04 = fluorescence'
+MU_CALCULATION = ('Transmission μ = ln(I0/I1) = ln(ADC_01/ADC_02); reference foil μ = ln(I1/I2) = ln(ADC_02/ADC_03); '
+    'fluorescence μ = If/I0 = ADC_04/ADC_01. Readings at the same energy are averaged first. Detector offsets in the '
+    'header are not applied. Edge positions are the maximum of dμ/dE (lightly smoothed): a quick check, not a calibration.')
+
+
+def mu_spectrum(rows, energy_index, channels):
+    """Average readings at the same energy (the scan dwells at its end), then take the ratios."""
+    import math
+    grouped, order = {}, []
+    for r in rows:
+        try:
+            energy = round(float(r[energy_index]), 4)
+            values = [float(r[channels[k]]) for k in ('ADC_01', 'ADC_02', 'ADC_03', 'ADC_04')]
+        except (ValueError, IndexError):
+            continue
+        if energy not in grouped:
+            grouped[energy] = []
+            order.append(energy)
+        grouped[energy].append(values)
+    spectrum, skipped = [], 0
+    for energy in sorted(order):
+        group = grouped[energy]
+        i0, i1, i2, fl = (sum(v[k] for v in group) / len(group) for k in range(4))
+        point = dict(energy=energy, mu_transmission=None, mu_reference=None, mu_fluorescence=None)
+        if i0 > 0 and i1 > 0:
+            point['mu_transmission'] = math.log(i0 / i1)
+        if i1 > 0 and i2 > 0:
+            point['mu_reference'] = math.log(i1 / i2)
+        if i0 > 0:
+            point['mu_fluorescence'] = fl / i0
+        if any(point[k] is None for k in ('mu_transmission', 'mu_reference', 'mu_fluorescence')):
+            skipped += 1
+        spectrum.append(point)
+    return spectrum, skipped
+
+
+def edge_position(spectrum, key, window=5):
+    points = [(p['energy'], p[key]) for p in spectrum if p[key] is not None]
+    if len(points) < 3 * window:
+        return None
+    smooth = []
+    for i in range(len(points)):
+        chunk = points[max(0, i - window):i + window + 1]
+        smooth.append((points[i][0], sum(v for _, v in chunk) / len(chunk)))
+    best, energy = None, None
+    for (e1, v1), (e2, v2) in zip(smooth[window:-window - 1], smooth[window + 1:-window]):
+        if e2 > e1:
+            slope = (v2 - v1) / (e2 - e1)
+            if best is None or slope > best:
+                best, energy = slope, (e1 + e2) / 2
+    return energy
 
 
 def parse_trajectory(trajectory):
@@ -242,48 +321,93 @@ def _nu_gc(sheet_name, grid, formulas, catalyst_at, injection_at):
     if not conc or species_row is None:
         warnings.append('The injection table could not be read (no species names under "Concentration").')
         return _gc_found(conditions, metadata, {}, [], warnings)
+    from catalyst_ingest.readers import col_name, coordinate_parts
+    inj_col = injection_at[1]
+    injection_rows = sorted(r for (r, c), v in grid.items() if c == inj_col and r > species_row and isinstance(v, (int, float)))
+    formula_rows = sorted({r for (r, c) in formulas if c == inj_col and r > species_row} | set(injection_rows))
+    # How the workbook is meant to be filled in is read from its own formulas:
+    #   CO2 conversion  =($V$8-V10)/$V$8*100  ->  column V holds unreacted CO2, row 8 is the reference (feed) average.
+    reactant_col, reference_row = None, None
+    first = next((r for r in formula_rows if (r, x_co2[0]) in formulas), None) if x_co2 else None
+    if first is not None:
+        absolute = re.findall(r'\$([A-Z]{1,3})\$(\d+)', formulas[(first, x_co2[0])])
+        if absolute:
+            reference_row, reactant_col = coordinate_parts(absolute[0][0] + absolute[0][1])
     species = {c: grid[(species_row, c)] for c in range(conc[0], conc[1] + 1) if is_formula(grid.get((species_row, c)))}
     sel_species = {c: grid[(species_row, c)] for c in range(sel[0], sel[1] + 1)
         if is_formula(grid.get((species_row, c)))} if sel else {}
+    if reactant_col is not None:
+        relabelled = [c for c, name in species.items() if name == 'CO2' and c != reactant_col]
+        for c in relabelled:
+            species[c] = 'CO'
+        for c, name in list(sel_species.items()):
+            if name == 'CO2':
+                sel_species[c] = 'CO'
+        if relabelled:
+            metadata['Column labels'] = (f"Column {', '.join(col_name(c) for c in relabelled)} is labelled CO2 but is a "
+                'product; read as CO. Unreacted CO2 is column ' + col_name(reactant_col) + ' (from the CO2 conversion formula).')
+        species[reactant_col] = 'CO2'
+        metadata['Reference injections'] = (f'rows {species_row + 1}–{reference_row - 1}, averaged in row {reference_row} '
+            '(feed composition before reaction)')
     odd = [s for s in species.values() if s.upper() not in INERT and carbon_atoms(s) == 0]
     if odd:
         warnings.append(f"No carbon atoms found in {', '.join(odd)}; they are left out of conversion and selectivity.")
-    inj_col = injection_at[1]
-    injection_rows = {r for (r, c) in grid if c == inj_col and r > species_row} | {r for (r, c) in formulas if c == inj_col}
-    broken = sorted({c for (r, c), f in formulas.items() if r in injection_rows and '#REF!' in f})
+    unnamed = [c for c in range(conc[0], conc[1] + 1) if c not in species and not isinstance(grid.get((species_row - 1, c)), str)
+        and any(isinstance(grid.get((r, c)), (int, float)) for r in injection_rows)]
+    if unnamed:
+        warnings.append(f"Column(s) {', '.join(col_name(c) for c in unnamed)} have amounts but no product formula in row "
+            f'{species_row}; they are left out. Add the formula (e.g. CH4) to include them.')
+    broken = sorted({c for (r, c), f in formulas.items() if r in formula_rows and '#REF!' in f})
     if broken:
-        from catalyst_ingest.readers import col_name
         warnings.append('The workbook has broken formulas (#REF!) in column(s) ' + ', '.join(col_name(c) for c in broken)
-            + '. Its own values there may be wrong; CATALYST recalculates conversion and selectivity from the amounts.')
+            + '. CATALYST calculates conversion and selectivity itself, so its values do not depend on them.')
+    # Reference (feed) values: the reference row if filled in, otherwise the average of the reference injections.
+    def reference(col):
+        if reference_row is None or col is None:
+            return None
+        value = grid.get((reference_row, col))
+        if isinstance(value, (int, float)):
+            return value
+        values = [grid.get((r, col)) for r in range(species_row + 1, reference_row)]
+        values = [v for v in values if isinstance(v, (int, float))]
+        return sum(values) / len(values) if values else None
+    feed_co2 = reference(reactant_col)
+    area = span(r'^peak area')
+    area_cols = {grid[(species_row, c)]: c for c in range(area[0], area[1] + 1) if is_formula(grid.get((species_row, c)))} if area else {}
+    ref_area = {gas: reference(c) for gas, c in area_cols.items()}
     rows = []
-    for row in sorted({r for (r, _c) in grid if r > species_row}):
+    for row in injection_rows:
         amounts = {s: grid.get((row, c)) for c, s in species.items()}
-        if not isinstance(grid.get((row, inj_col)), (int, float)) or not any(isinstance(v, (int, float)) for v in amounts.values()):
-            continue  # calibration rows, averages and empty template rows have no injection number
+        if not any(isinstance(v, (int, float)) for v in amounts.values()):
+            continue  # an injection number with no results yet
         entry = dict(injection=grid.get((row, inj_col)), time_min=grid.get((row, time_at[0])) if time_at else None,
-            amounts_umol={s: v for s, v in amounts.items() if isinstance(v, (int, float))})
-        entry['lab_co2_conversion_pct'] = grid.get((row, x_co2[0])) if x_co2 else None
-        entry['lab_h2_conversion_pct'] = grid.get((row, x_h2[0])) if x_h2 else None
+            amounts_umol={s: v for s, v in amounts.items() if isinstance(v, (int, float))},
+            areas={g: grid.get((row, c)) for g, c in area_cols.items() if isinstance(grid.get((row, c)), (int, float))})
+        numeric = lambda value: value if isinstance(value, (int, float)) else None  # '#DIV/0!' and blanks -> empty
+        entry['lab_co2_conversion_pct'] = numeric(grid.get((row, x_co2[0]))) if x_co2 else None
+        entry['lab_h2_conversion_pct'] = numeric(grid.get((row, x_h2[0]))) if x_h2 else None
         entry['lab_selectivity_pct'] = {s: grid.get((row, c)) for c, s in sel_species.items()
             if isinstance(grid.get((row, c)), (int, float))}
-        entry.update(standard_metrics(entry['amounts_umol']))
+        entry.update(standard_metrics(entry['amounts_umol'], feed_co2, entry['areas'], ref_area))
         rows.append(entry)
     negative = [r['injection'] for r in rows if any(v < 0 for v in r['amounts_umol'].values())]
     if negative:
         warnings.append(f"Injection(s) {', '.join(str(n) for n in negative)} have negative amounts; they were left out "
             'of the calculated results.')
     differ = [r['injection'] for r in rows if isinstance(r['lab_co2_conversion_pct'], (int, float))
-        and r['co2_conversion_pct'] is not None and abs(r['lab_co2_conversion_pct'] - r['co2_conversion_pct']) > 2]
+        and r['co2_conversion_pct'] is not None and abs(r['lab_co2_conversion_pct'] - r['co2_conversion_pct']) > 0.5]
     if differ:
-        warnings.append(f"CATALYST's CO2 conversion differs from the workbook's own value by more than 2 points in "
-            f"injection(s) {', '.join(str(n) for n in differ[:10])}. The two use different formulas; check which "
-            'columns hold which gas with the lab before relying on either.')
-    if rows:
-        warnings.append('Calculated results are provisional until Northwestern confirms what each amount column '
-            'contains. Both CATALYST\'s values and the workbook\'s own values are kept.')
-    if not rows:
-        warnings.append('No injections with amounts yet (this looks like an empty template). Setup details were read; '
-            'conversion and selectivity will be calculated once the workbook has data.')
+        warnings.append("CATALYST's CO2 conversion differs from the workbook's own value by more than 0.5 points in "
+            f"injection(s) {', '.join(str(n) for n in differ[:10])}. Check the workbook's formulas in those rows.")
+    if rows and feed_co2 is None:
+        warnings.append('No reference (feed) CO2 amount was found, so CO2 conversion is estimated from the products '
+            'instead of from CO2 consumption.')
+    if sel_species and rows:
+        metadata['Lab selectivity formulas'] = ('kept as the workbook calculates them; they weigh products differently '
+            'from the carbon basis CATALYST uses, so the two sets of numbers differ')
+    if not injection_rows:
+        warnings.append('No injections yet (this is an empty template). The setup was read; conversion and selectivity '
+            'are calculated once injection results are filled in.')
     return _gc_found(conditions, metadata, summarise(rows), rows, warnings)
 
 
@@ -296,9 +420,10 @@ def is_formula(value):
 ELEMENTS = {'H', 'He', 'C', 'N', 'O', 'Ar', 'S', 'Cl', 'F', 'Ne', 'Kr', 'Xe'}
 
 
-def standard_metrics(amounts):
-    """CATALYST standard carbon-basis CO2 conversion and product selectivity for one injection."""
-    result = dict(co2_conversion_pct=None, selectivity_pct={})
+def standard_metrics(amounts, feed_co2=None, areas=None, ref_areas=None):
+    """One injection, the CATALYST way (see CALCULATION)."""
+    result = dict(co2_conversion_pct=None, co2_conversion_from_products_pct=None, h2_conversion_pct=None,
+        carbon_balance_pct=None, selectivity_pct={})
     if any(v < 0 for v in amounts.values()):
         return result
     carbon = {s: carbon_atoms(s) * v for s, v in amounts.items() if s.upper() not in INERT and s != 'CO2' and carbon_atoms(s)}
@@ -306,8 +431,16 @@ def standard_metrics(amounts):
     co2 = amounts.get('CO2')
     if total > 0:
         result['selectivity_pct'] = {s: round(100 * c / total, 4) for s, c in carbon.items()}
-        if isinstance(co2, (int, float)) and co2 + total > 0:
-            result['co2_conversion_pct'] = round(100 * total / (co2 + total), 4)
+        if isinstance(co2, (int, float)):
+            result['co2_conversion_from_products_pct'] = round(100 * total / (co2 + total), 4)
+    if isinstance(co2, (int, float)) and feed_co2:
+        result['co2_conversion_pct'] = round(100 * (feed_co2 - co2) / feed_co2, 4)
+        result['carbon_balance_pct'] = round(100 * (co2 + total) / feed_co2, 4)
+    elif result['co2_conversion_from_products_pct'] is not None:
+        result['co2_conversion_pct'] = result['co2_conversion_from_products_pct']
+    areas, ref_areas = areas or {}, ref_areas or {}
+    if isinstance(areas.get('H2'), (int, float)) and ref_areas.get('H2'):
+        result['h2_conversion_pct'] = round(100 * (ref_areas['H2'] - areas['H2']) / ref_areas['H2'], 4)
     return result
 
 
@@ -315,19 +448,20 @@ def summarise(rows):
     if not rows:
         return {}
     last = rows[-3:]
-    conversions = [r['co2_conversion_pct'] for r in last if r['co2_conversion_pct'] is not None]
-    products = sorted({s for r in last for s in r['selectivity_pct']})
     summary = dict(injections=len(rows), averaged_over_last=len(last), calculation=CALCULATION)
-    if conversions:
-        summary['co2_conversion_pct'] = round(sum(conversions) / len(conversions), 3)
-    for s in products:
+    def mean(key):
+        values = [r[key] for r in last if r.get(key) is not None]
+        return round(sum(values) / len(values), 3) if values else None
+    for key in ('co2_conversion_pct', 'h2_conversion_pct', 'carbon_balance_pct'):
+        if mean(key) is not None:
+            summary[key] = mean(key)
+    for s in sorted({s for r in last for s in r['selectivity_pct']}):
         values = [r['selectivity_pct'].get(s, 0.0) for r in last if r['selectivity_pct']]
         if values:
             summary[f'selectivity_{s}_pct'] = round(sum(values) / len(values), 3)
     times = [r['time_min'] for r in rows if isinstance(r['time_min'], (int, float))]
     if times:
         summary['last_injection_time_min'] = max(times)
-    summary['status'] = 'provisional (calculation not yet confirmed by the lab)'
     return summary
 
 
@@ -337,7 +471,8 @@ def _gc_found(conditions, metadata, results, rows, warnings):
         species = sorted({s for r in rows for s in r['amounts_umol']})
         products = sorted({s for r in rows for s in r['selectivity_pct']})
         lab = sorted({s for r in rows for s in r['lab_selectivity_pct']})
-        header = (['injection', 'time_min'] + [f'amount_{s}_umol' for s in species] + ['catalyst_CO2_conversion_pct']
+        header = (['injection', 'time_min'] + [f'amount_{s}_umol' for s in species] + ['catalyst_CO2_conversion_pct',
+            'catalyst_CO2_conversion_from_products_pct', 'catalyst_H2_conversion_pct', 'catalyst_carbon_balance_pct']
             + [f'catalyst_selectivity_{s}_pct' for s in products] + ['lab_CO2_conversion_pct', 'lab_H2_conversion_pct']
             + [f'lab_selectivity_{s}_pct' for s in lab])
         out = io.StringIO()
@@ -345,12 +480,13 @@ def _gc_found(conditions, metadata, results, rows, warnings):
         writer.writerow(header)
         for r in rows:
             writer.writerow([r['injection'], r['time_min']] + [r['amounts_umol'].get(s, '') for s in species]
-                + [r['co2_conversion_pct']] + [r['selectivity_pct'].get(s, '') for s in products]
+                + [r['co2_conversion_pct'], r['co2_conversion_from_products_pct'], r['h2_conversion_pct'], r['carbon_balance_pct']]
+                + [r['selectivity_pct'].get(s, '') for s in products]
                 + [r['lab_co2_conversion_pct'], r['lab_h2_conversion_pct']] + [r['lab_selectivity_pct'].get(s, '') for s in lab])
         derived.append(dict(suffix='CATALYST results.csv', content=out.getvalue().encode('utf-8'),
-            description='Per-injection amounts with CATALYST-standard conversion and selectivity, and the lab\'s own values.'))
+            description='per-injection amounts with CATALYST conversion, carbon balance and selectivity, and the lab\'s own values'))
     conditions.setdefault('instrument', 'GC')
-    return Found(reader='nu-gc-workbook/1', label='Northwestern GC analysis workbook', technique='RXN', date=None,
+    return Found(reader='nu-gc-workbook/2', label='Northwestern GC analysis workbook', technique='RXN', date=None,
         title='', conditions=conditions, metadata=metadata, results=results, derived=derived, warnings=warnings)
 
 

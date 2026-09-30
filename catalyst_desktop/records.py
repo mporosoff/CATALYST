@@ -601,7 +601,9 @@ def recipe_lines(recipe, fields=RECIPE_FIELDS):
 RESULT_LABELS = {'co2_conversion_pct': 'CO2 conversion (%)', 'time_on_stream_h': 'Time on stream (h)',
     'injections': 'GC injections', 'averaged_over_last': 'Averaged over last injections',
     'last_injection_time_min': 'Last injection (min after the first)', 'status': 'Calculation status',
-    'source_file': 'Calculated from'}
+    'source_file': 'Calculated from', 'h2_conversion_pct': 'H2 conversion (%)', 'carbon_balance_pct': 'Carbon balance (%)',
+    'points': 'Spectrum points', 'channel_map': 'Detector channels', 'edge_transmission_eV': 'Edge, sample (eV)',
+    'edge_reference_eV': 'Edge, reference foil (eV)', 'edge_fluorescence_eV': 'Edge, fluorescence (eV)'}
 
 
 def result_label(key):
