@@ -232,6 +232,72 @@ def main():
             assert any('registered in error' in app.pages['samples'].view.set(i, 'id') for i in app.pages['samples'].view.get_children())
         finally:
             appmod.PreviewDialog = real_preview
+        # Partner files: a test protocol from a document, then a reactor upload that reads the GC workbook.
+        from test_filereaders import docx, nu_workbook, ssrl_scan
+        protocol_doc = Path(folder) / 'Standard conditions.docx'
+        protocol_doc.write_bytes(docx([[['GHSV', '11,000', 'h-1'], ['Catalyst Mass', '0.25', 'g'], ['Total Flow Rate', '40', 'cm3/min']],
+            [['Stage 3', 'CO2 to Methanol'], ['Reaction Temperature', '250 ℃'], ['CO2', '10 SCCM'], ['UHP H2', '30 SCCM']]]))
+        app.show('procedure_form', category='testing')
+        pform = app.pages['procedure_form']
+        pform.name.insert(0, 'CO2 to methanol, 250 °C')
+        pform.import_document(str(protocol_doc))
+        assert pform.recipe.widgets['reaction_T_C'].get() == '250' and pform.files.items, pform.import_note.cget('text')
+        root.update(); snap(root, '10-test-protocol')
+        pform.save()
+        assert any(p['id'] == 'TST-UR-001' and p['category'] == 'testing' for p in app.procedures), app.procedures
+        assert all(p['id'].startswith('PRC') for p in app.synthesis_procedures())
+        app.show('upload', sample=app.active_samples()[0], protocol_id='TST-UR-001')
+        upload = app.pages['upload']
+        assert upload.protocol and upload.condition_widgets['temperature_C'].get() == '250', upload.protocol_note.cget('text')
+        upload.condition_widgets['temperature_C'].delete(0, 'end'); upload.condition_widgets['temperature_C'].insert(0, '270')
+        gc = Path(folder) / 'NU run.xlsx'
+        gc.write_bytes(nu_workbook())
+        upload.files.add([str(gc)])
+        assert upload.found and upload.condition_widgets['pressure_bar'].get() == '30', upload.found_label.cget('text')
+        root.update(); snap(root, '11-upload-reads-gc')
+        record, problems = upload.build_record(upload.next_id())
+        assert not problems and record['protocol']['id'] == 'TST-UR-001', problems
+        assert [d['field'] for d in record['protocol_deviations']] == ['temperature_C'], record['protocol_deviations']
+        assert record['results']['co2_conversion_pct'] > 0 and any(f.endswith('CATALYST results.csv') for f in record['files'])
+        upload.save()
+        saved = next(d for d in app.current['data'] if d['record'].get('results'))
+        assert any(f['realName'].endswith('CATALYST results.csv') for f in saved['files'])
+        # Replacing the workbook in an edit recalculates, and the old results table is superseded with it.
+        appmod.PreviewDialog = auto_preview
+        try:
+            fix = appmod.CorrectionDialog(app, saved['record'], app.current['sample']['experiment_id'], saved, app.pages['sample'].reload)
+            fix.supersede['NU run.xlsx'].set(True)
+            fix.files.items = [FileItem(name='NU run.xlsx', content=nu_workbook(injections=((80, 2, 0, 10),)))]; fix.files.render()
+            appmod.set_text(fix.reason, 'Wrong workbook.')
+            fix.preview()
+            assert previews[-1]['problems'] == [], previews[-1]
+        finally:
+            appmod.PreviewDialog = real_preview
+        saved = next(d for d in app.current['data'] if d['id'] == saved['id'])
+        assert saved['record']['results']['co2_conversion_pct'] == round(100 * 14 / 94, 4) or \
+            abs(saved['record']['results']['co2_conversion_pct'] - 100 * 14 / 94) < 1e-3, saved['record']['results']
+        current = [f['name'] for f in saved['record']['files']]
+        assert 'NU run - CATALYST results.csv' in saved['record']['superseded_files'], saved['record']
+        assert current == ['NU run (r2).xlsx', 'NU run - CATALYST results (r2).csv'], current
+        assert saved['record']['results']['source_file'] == 'NU run (r2).xlsx'
+        assert saved['record']['extracted'][-1]['derived_files'] == ['NU run - CATALYST results (r2).csv'], saved['record']['extracted']
+        # A SLAC scan fills in the XAS form; a later analysis is linked to it.
+        scan = Path(folder) / 'Re_L-3_EXAFS_0009.txt'
+        scan.write_bytes(ssrl_scan())
+        app.show('upload', sample=app.current['sample'])
+        upload.files.add([str(scan)])
+        assert upload.technique.get() == appmod.ids.TECHNIQUES['XAS'] and upload.condition_widgets['edge'].get() == 'Re L3-edge'
+        root.update(); upload.scroll.canvas.yview_moveto(1.0); root.update(); snap(root, '13-upload-reads-scan')
+        assert upload.when.get() == '2025-07-19'
+        upload.save()
+        raw = next(d for d in app.current['data'] if d['technique'] == 'XAS' and d['record'].get('extracted'))
+        app.show('upload', sample=app.current['sample'])
+        upload.technique.set(appmod.ids.TECHNIQUES['XAS']); upload.technique_changed()
+        upload.analysis_of.set(raw['id'])
+        upload.files.items = [FileItem(name='wavelet.png', content=b'png')]; upload.files.render()
+        upload.save()
+        assert any(d['record'].get('derived_from') == [raw['id']] for d in app.current['data'])
+        app.pages['sample'].shown(); snap(root, '12-sample-with-analysis')
         app.show('settings'); snap(root, '8-settings')
         root.destroy()
     print('Redesigned interface: all screens and the save/export flows work with synthetic data.')

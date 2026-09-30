@@ -61,6 +61,25 @@ No procedure is needed. The sample list shows it as "Commercial · supplier prod
 
 Every file is checked after upload.
 
+## Test protocols (reactor testing)
+
+A test protocol is the shared set of standard testing conditions, such as Northwestern's CO₂-to-methanol test. It is to reactor data what a synthesis procedure is to a sample. Protocol IDs look like `TST-NU-001`.
+
+- **Create one:** go to **Procedures → + New test protocol**. If the conditions are already written in a Word document, click **Fill in from a document (.docx)…**. The fields fill in from the document's tables and the document is attached. Check the fields, then save.
+- **Use one:** when uploading reactor data, pick the protocol under **Test protocol**. Its conditions fill in. Change anything your run did differently, and CATALYST records those changes as differences from the protocol.
+- **Improve one:** use **Save a new version**. Each run keeps the version it followed.
+
+## Files CATALYST reads for you
+
+When you add one of these files to an upload, CATALYST reads it and fills in the form. Check what it filled in. It only fills empty fields, and when a file disagrees with a value you already have, it tells you. The original file is always stored unchanged.
+
+- **Northwestern GC analysis workbook (.xlsx):** reads the catalyst mass, gas flows, pressure, GC method and each injection. It then calculates CO₂ conversion and product selectivity the same way for every lab (on a carbon basis), shows them next to the workbook's own values, and adds a results table (`… - CATALYST results.csv`) to the record.
+- **SLAC (SSRL) raw EXAFS scan (.txt):** reads the scan name, date, edge, monochromator and energy range. Absorption μ(E) isn't calculated yet, because SLAC still has to confirm which detector channel is which.
+
+## Analysis results (fits, wavelet transforms, figures)
+
+Upload processed results as their own data record, then choose the raw record under **This is an analysis of**. On the sample page the record is marked "analysis" and links back to the raw scan. If you have the numbers behind a figure (for example χ(k) or the wavelet map as a CSV), add them too, since AI tools can't read values off a picture.
+
 ## Find and download data
 
 **Samples** is the home screen.

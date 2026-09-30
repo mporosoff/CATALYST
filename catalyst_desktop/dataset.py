@@ -34,9 +34,11 @@ def _components(recipe):
     return recipe.get('components') or []
 
 
-def recipe_columns(recipe, prefix='recipe_'):
+def recipe_columns(recipe, prefix='recipe_', fields=records.RECIPE_FIELDS):
     """Flat recipe columns, including one numeric column per component, e.g. ``load_Mo (wt%)``."""
     recipe = recipe or {}
+    if fields is not records.RECIPE_FIELDS:
+        return {prefix + key: recipe.get(key) for key, *_ in fields}
     row = {prefix + 'components': records.component_text(_components(recipe))}
     for c in _components(recipe):
         if c.get('loading') is not None:
@@ -88,6 +90,13 @@ def data_rows(entry, condition_keys):
         row.update(pooled_with=', '.join(r.get('pooled_with', [])), notes=r.get('notes', ''),
             files='; '.join(f['name'] for f in r.get('files', [])), revision=records.revision_of(r),
             last_corrected=str(r.get('revised_at') or '')[:10])
+        protocol = r.get('protocol') or {}
+        row.update(protocol_id=protocol.get('id', ''), protocol_version=protocol.get('version'),
+            differs_from_protocol='; '.join(f"{d['label']}: {d['protocol']} -> {d['run']}" for d in r.get('protocol_deviations', [])),
+            analysis_of=', '.join(r.get('derived_from', [])))
+        for key, value in (r.get('results') or {}).items():
+            if key != 'calculation':
+                row['result_' + key] = value
         for key in SAMPLE_KEYS_IN_DATA:
             row['sample_' + key] = base[key]
         row.update({'sample_' + k: v for k, v in base.items() if k.startswith('recipe_')})
@@ -99,9 +108,11 @@ def procedure_rows(procedures):
     rows = []
     for p in procedures:
         for r in p['versions']:
-            row = dict(procedure_id=r['id'], version=r['version'], name=r['name'], lab=r['created_by']['lab'],
+            row = dict(procedure_id=r['id'], version=r['version'], type=records.CATEGORIES[r.get('category', 'synthesis')],
+                name=r['name'], lab=r['created_by']['lab'],
                 written_by=r['created_by']['name'], created=r['created_at'][:10], description=r.get('description', ''))
-            row.update(recipe_columns(r['recipe']))
+            row.update(recipe_columns(r['recipe'], 'recipe_' if r.get('category') != 'testing' else 'test_',
+                records.fields_for(r)))
             rows.append(row)
     return rows
 

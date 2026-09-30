@@ -382,6 +382,12 @@ class App:
         self.run('Downloading…', work, lambda saved: self.info(f'Saved {len(saved)} file(s) to {folder}. Each file was '
             'checked against its original checksum.'))
 
+    def synthesis_procedures(self):
+        return [p for p in self.procedures if p.get('category', 'synthesis') == 'synthesis']
+
+    def test_protocols(self):
+        return [p for p in self.procedures if p.get('category') == 'testing']
+
     def active_samples(self):
         return [s for s in self.samples if s.get('status') != 'registered_in_error']
 
@@ -761,7 +767,8 @@ class SamplePage(Page):
         for item in sorted(shown_data, key=lambda d: (d['date'], d['id'])):
             gone = item in withdrawn
             self.data_view.insert('', 'end', iid=str(item['section_id']), values=(item['id'],
-                ('Withdrawn · ' if gone else '') + ids.TECHNIQUES.get(item['technique'], item['technique']), item['date'],
+                ('Withdrawn · ' if gone else '') + ('Analysis · ' if item['record'].get('derived_from') else '')
+                + ids.TECHNIQUES.get(item['technique'], item['technique']), item['date'],
                 ids.lab_name(item['lab']) if item['lab'] in ids.LAB_CODES else item['lab'], item['initials'], len(item['files'])),
                 tags=('withdrawn',) if gone else ())
         self.ship_view.delete(*self.ship_view.get_children())
@@ -1109,7 +1116,7 @@ class CorrectionDialog(tk.Toplevel):
             row = ((len(records.COMMERCIAL_FIELDS) + 1) // 2) * 2
         else:
             self.procedure_box = SearchCombo(grid, width=50, on_select=self.pick_procedure)
-            self.procedure_box.set_items([(p['id'], f"{p['id']}  ·  {p['name']}") for p in app.procedures])
+            self.procedure_box.set_items([(p['id'], f"{p['id']}  ·  {p['name']}") for p in app.synthesis_procedures()])
             self.procedure_box.set_value(r['procedure'].get('id'))
             field(grid, 0, 'Synthesis procedure', self.procedure_box, 'Change it only if the wrong procedure was chosen.', span=2)
             self.procedure_note = ttk.Label(grid, style='Hint.TLabel', wraplength=800, justify='left')
@@ -1183,6 +1190,8 @@ class CorrectionDialog(tk.Toplevel):
 
     def build_data(self, body):
         r = self.record
+        if r.get('protocol'):
+            self.app.load_procedure(r['protocol']['id'], lambda _value: None)  # cached, to recompute differences
         grid = ttk.Frame(body)
         grid.pack(fill='x')
         ttk.Label(grid, text=f"{r['technique_label']} data for {r['sample_id']}", style='Sub.TLabel').grid(row=0, column=0, sticky='w')
@@ -1259,10 +1268,22 @@ class CorrectionDialog(tk.Toplevel):
                 profile=profile, measured_date=self.when.get(), conditions=conditions, notes=text_value(self.notes),
                 title=self.title_entry.get(), pooled_with=self.pooled.get().split(','), files=r.get('files', []),
                 app_version=__version__)
+            for key in ('protocol', 'protocol_deviations', 'derived_from', 'extracted', 'results'):
+                if key in r:
+                    record[key] = r[key]
+            protocol = r.get('protocol')
+            cached = self.app.procedure_cache.get(protocol['id']) if protocol else None
+            version = next((v for v in (cached or {}).get('versions', []) if v['version'] == protocol.get('version')), None) if protocol else None
+            if version:  # recompute the differences from the protocol for the corrected conditions
+                again = records.data_record(data_id=r['id'], sample_id=r['sample_id'], technique=r['technique'], profile=profile,
+                    measured_date=self.when.get(), conditions=conditions, files=['x'],
+                    protocol=dict(protocol, recipe=version['record']['recipe']))[0]
+                record['protocol_deviations'] = again['protocol_deviations']
             return record, [p for p in problems if 'data file' not in p]  # files are checked below
         record, problems = records.procedure_record(procedure_id=r['id'], version=r['version'], name=r['name'],
             profile=profile, recipe=dict(r.get('recipe') or {}, steps=text_value(self.steps)),
-            description=text_value(self.description), files=r.get('files', []), app_version=__version__)
+            description=text_value(self.description), files=r.get('files', []), app_version=__version__,
+            category=r.get('category', 'synthesis'))
         return record, problems
 
     def preview(self):
@@ -1277,6 +1298,9 @@ class CorrectionDialog(tk.Toplevel):
         problems = problems + more
         supersede = [name for name, var in self.supersede.items() if var.get()]
         new_files = list(self.files.items)
+        if self.kind == 'data':
+            record, supersede, new_files, protocol_problem = self.data_file_updates(record, supersede, new_files)
+            problems += protocol_problem
         try:
             check_files(new_files, required=False)
         except StoreError as error:
@@ -1298,6 +1322,41 @@ class CorrectionDialog(tk.Toplevel):
             new_files, problems, self.save)
         if isinstance(preview, tk.Toplevel):  # keep this window modal after "Back to editing"
             preview.bind('<Destroy>', lambda e: e.widget is preview and self.winfo_exists() and self.grab_set(), add='+')
+
+    def data_file_updates(self, record, supersede, new_files):
+        """Keep what CATALYST read from the files in step with the files: re-read new ones, drop superseded ones."""
+        from . import filereaders
+        r, problems = self.record, []
+        protocol = r.get('protocol')
+        if protocol and protocol['id'] not in self.app.procedure_cache and any(p['id'] == protocol['id'] for p in self.app.procedures):
+            problems.append('Still loading the test protocol, to recheck the differences from it. Try again in a moment.')
+        gone = set(supersede)
+        source = (record.get('results') or {}).get('source_file') or next(
+            (e['file'] for e in record.get('extracted', []) if 'workbook' in e.get('reader', '')), None)
+        record['extracted'] = [e for e in record.get('extracted', []) if e.get('file') not in gone]
+        if record.get('results') and source in gone:
+            record['results'] = {}
+        linked = {n for e in r.get('extracted', []) if e.get('file') in gone for n in e.get('derived_files', [])}
+        current = {f['name'] for f in r.get('files', [])}
+        supersede = supersede + sorted((linked & current) - gone)
+        extra = []
+        for item in new_files:
+            try:
+                found = filereaders.read_file(item.name, item.read())
+            except (OSError, StoreError):
+                found = None
+            if not found:
+                continue
+            made = []
+            if found.get('results') and not record.get('results'):
+                record['results'] = dict(found['results'], source_file=item.name)
+                made = [FileItem(name=f"{Path(item.name).stem} - {d['suffix']}", content=d['content'])
+                    for d in found.get('derived') or []]
+                extra += made
+            record['extracted'] = record['extracted'] + [dict(file=item.name, reader=found['reader'], label=found['label'],
+                metadata=found.get('metadata') or {}, warnings=found.get('warnings') or [], derived_files=[i.name for i in made])]
+        taken = {i.name for i in new_files}
+        return record, supersede, new_files + [i for i in extra if i.name not in taken], problems
 
     def save(self):
         app, r = self.app, self.record
@@ -1394,9 +1453,9 @@ class HistoryDialog(tk.Toplevel):
 class RecipeFields:
     """The shared synthesis template, laid out (and tabbed through) top to bottom, left to right."""
 
-    def __init__(self, parent, on_change, start_row=2):
+    def __init__(self, parent, on_change, start_row=2, fields=records.RECIPE_FIELDS):
         self.widgets = {}
-        ordered = [f for f in records.RECIPE_FIELDS if f[2] != 'long'] + [f for f in records.RECIPE_FIELDS if f[2] == 'long']
+        ordered = [f for f in fields if f[2] != 'long'] + [f for f in fields if f[2] == 'long']
         row, column = start_row, 0
         for key, label, kind, choices, hint in ordered:
             if kind in ('components', 'long'):
@@ -1406,6 +1465,7 @@ class RecipeFields:
                     widget = ComponentsEditor(parent, records.LOADING_UNITS, on_change)
                 else:
                     widget = text_box(parent, height=5 if key == 'steps' else 3)
+                    widget.bind('<FocusOut>', lambda _e: on_change(), add='+')
                     widget.bind('<KeyRelease>', lambda _e: on_change())
                 field(parent, row, label, widget, hint, span=2)
                 row += 2
@@ -1626,7 +1686,7 @@ class SampleForm(Page):
         self.update_preview()
 
     def data_changed(self):
-        self.procedure_box.set_items([(p['id'], f"{p['id']}  ·  {p['name']}") for p in self.app.procedures])
+        self.procedure_box.set_items([(p['id'], f"{p['id']}  ·  {p['name']}") for p in self.app.synthesis_procedures()])
         self.parent.set_items(self.app.sample_choices())
         if getattr(self, '_pending_procedure', None) and self.app.procedures:
             pid, self._pending_procedure = self._pending_procedure, None
@@ -1808,19 +1868,29 @@ class UploadForm(Page):
         ttk.Button(actions, text='Clear form', command=self.clear).pack(side='left')
         scroll = ScrollFrame(self.frame, style='Page.TFrame')
         scroll.pack(fill='both', expand=True)
+        self.scroll = scroll
         card = Card(scroll.body, padding=18)
         card.pack(fill='x', pady=(0, 12))
         body = card.body
         self.sample = SearchCombo(body, width=60, on_select=lambda _v: self.changed())
         field(body, 0, 'Sample', self.sample, 'Type part of the ID or composition. Your recent samples are listed first.', span=2)
+        self.protocol, self._read_cache, self.found, self._technique_touched = None, {}, [], False
         self.technique = ttk.Combobox(body, values=list(ids.TECHNIQUES.values()), state='readonly', width=36)
-        self.technique.bind('<<ComboboxSelected>>', lambda _e: self.technique_changed())
+        self.technique.bind('<<ComboboxSelected>>', lambda _e: (setattr(self, '_technique_touched', True), self.technique_changed()))
         field(body, 2, 'Technique', self.technique)
         self.when = DateEntry(body, on_change=self.changed)
         field(body, 2, 'Date measured', self.when, column=1)
         self.title_entry = ttk.Entry(body, width=50)
         self.title_entry.bind('<KeyRelease>', lambda _e: self.changed())
         field(body, 4, 'Short description (optional)', self.title_entry, 'e.g. "post-reaction XRD" or "250–350 °C screening"', span=2)
+        self.protocol_frame = ttk.Frame(body)
+        self.protocol_frame.grid(row=6, column=0, columnspan=2, sticky='ew')
+        self.protocol_box = SearchCombo(self.protocol_frame, width=60, on_select=self.pick_protocol)
+        field(self.protocol_frame, 0, 'Test protocol (optional)', self.protocol_box, 'The shared protocol this run followed. '
+            'Its conditions fill in below; anything you change is recorded as a difference from the protocol.')
+        self.protocol_note = ttk.Label(self.protocol_frame, style='Hint.TLabel', wraplength=760, justify='left')
+        self.protocol_note.grid(row=2, column=0, sticky='w')
+        self.protocol_frame.columnconfigure(0, weight=1)
         body.columnconfigure(0, weight=1)
         body.columnconfigure(1, weight=1)
         self.conditions_card = Card(scroll.body, padding=18)
@@ -1835,6 +1905,12 @@ class UploadForm(Page):
         self.pooled.bind('<KeyRelease>', lambda _e: self.changed())
         field(more.body, 0, 'Tested together with other samples (optional)', self.pooled,
             'For pooled / multi-catalyst tests: other sample IDs, separated by commas.')
+        self.analysis_of = ttk.Combobox(more.body, width=40)
+        self.analysis_of.bind('<KeyRelease>', lambda _e: self.changed())
+        self.analysis_of.bind('<<ComboboxSelected>>', lambda _e: self.changed())
+        field(more.body, 0, 'This is an analysis of (optional)', self.analysis_of, 'For processed results, e.g. a wavelet '
+            'transform or EXAFS fit: choose the raw data record it was made from.', column=1)
+        more.body.columnconfigure(1, weight=1)
         self.notes = text_box(more.body, height=3)
         self.notes.bind('<KeyRelease>', lambda _e: self.changed())
         field(more.body, 2, 'Notes (optional)', self.notes)
@@ -1844,8 +1920,10 @@ class UploadForm(Page):
         ttk.Label(files.body, text='Data files', style='Sub.TLabel').pack(anchor='w')
         ttk.Label(files.body, text='Add the original instrument exports, spreadsheets, images or PDFs. They are stored '
             'unchanged (up to 20 MB each).', style='Hint.TLabel').pack(anchor='w', pady=(0, 6))
-        self.files = FileList(files.body, on_change=self.changed)
+        self.files = FileList(files.body, on_change=self.files_changed)
         self.files.pack(fill='x')
+        self.found_label = ttk.Label(files.body, style='Value.TLabel', wraplength=900, justify='left')
+        self.found_label.pack(anchor='w', pady=(8, 0))
         foot = ttk.Frame(self.frame, style='Page.TFrame')
         foot.pack(fill='x', pady=(10, 0))
         self.id_preview = ttk.Label(foot, style='Subtitle.TLabel')
@@ -1873,16 +1951,152 @@ class UploadForm(Page):
             self.condition_widgets[key] = widget
         for column in range(3):
             self.conditions.columnconfigure(column, weight=1)
+        if hasattr(self, 'protocol_frame'):
+            reactor = ids.TECHNIQUE_BY_LABEL.get(self.technique.get()) in ('RXN', 'HTE', 'PILOT')
+            (self.protocol_frame.grid() if reactor else self.protocol_frame.grid_remove())
 
     def technique_changed(self):
         keep = {k: w.get() for k, w in self.condition_widgets.items()}
         self.build_conditions(keep)
+        reactor = ids.TECHNIQUE_BY_LABEL.get(self.technique.get()) in ('RXN', 'HTE', 'PILOT')
+        if not reactor and self.protocol:
+            self.protocol_box.set_value(None); self.protocol = None; self.protocol_note.configure(text='')
         self.changed()
+
+    # test protocol -------------------------------------------------------
+    def pick_protocol(self, protocol_id):
+        self.protocol = None
+        # Values the previous protocol filled in (and nobody changed since) make way for the new protocol's.
+        for key, value in getattr(self, '_protocol_filled', {}).items():
+            widget = self.condition_widgets.get(key)
+            if widget is not None and widget.get().strip() == value:
+                widget.delete(0, 'end')
+        self._protocol_filled = {}
+        if not protocol_id:
+            self.protocol_note.configure(text='')
+            return self.changed()
+        def loaded(value):
+            if self.protocol_box.get_value() != protocol_id:
+                return  # the researcher has picked another protocol meanwhile
+            if not value or not value['versions']:
+                self.protocol_note.configure(text='This protocol has no saved versions yet.')
+                return
+            latest = value['versions'][-1]['record']
+            self.protocol = dict(id=value['id'], version=latest['version'], name=latest['name'], recipe=latest['recipe'])
+            expected = records.protocol_conditions(latest['recipe'])
+            filled = self.fill_conditions(expected)
+            self._protocol_filled = {k: v for k, v in expected.items()
+                if k in self.condition_widgets and self.condition_widgets[k].get().strip() == v}
+            self.protocol_note.configure(text=f"Using {value['id']} version {latest['version']}." + (
+                f" Filled in: {', '.join(filled)}." if filled else '') + ' Change anything this run did differently.')
+            self.changed()
+        self.app.load_procedure(protocol_id, loaded)
+
+    def fill_conditions(self, values, conflicts=None):
+        """Fill empty condition fields only; returns the labels filled. Different existing values go in ``conflicts``."""
+        labels = {f[0]: f[1] for f in records.condition_fields(self.technique.get())}
+        filled = []
+        for key, value in values.items():
+            widget = self.condition_widgets.get(key)
+            if widget is None or not value:
+                continue
+            if not widget.get().strip():
+                widget.insert(0, value)
+                filled.append(labels.get(key, key))
+            elif conflicts is not None and not records.same_value(widget.get(), value):
+                conflicts.append(f'{labels.get(key, key)} is {value} in the file (kept {widget.get().strip()})')
+        return filled
+
+    # reading the chosen files -------------------------------------------
+    def files_changed(self):
+        if not hasattr(self, 'found_label'):
+            return  # still building the form
+        self.read_files()
+        self.changed()
+
+    def read_files(self):
+        from . import filereaders
+        found, notes = [], []
+        for item in self.files.items:
+            try:
+                stat = item.path.stat() if item.path else None
+                key = (str(item.path), stat.st_mtime_ns, stat.st_size) if stat else (item.name, id(item))
+            except OSError:
+                continue
+            if key not in self._read_cache:
+                try:
+                    self._read_cache[key] = filereaders.read_file(item.name, item.read())
+                except (OSError, StoreError):
+                    self._read_cache[key] = None
+                result = self._read_cache[key]
+                if result and not self._loading:
+                    notes += self.apply_found(item.name, result)
+            if self._read_cache[key]:
+                found.append((item.name, self._read_cache[key]))
+        self.found = found
+        self.render_found(notes)
+
+    def apply_found(self, name, result):
+        notes = []
+        technique = ids.TECHNIQUES.get(result.get('technique'))
+        filled_by_app = set(getattr(self, '_protocol_filled', {}))
+        typed = any(w.get().strip() for k, w in self.condition_widgets.items() if k not in filled_by_app)
+        if technique and technique != self.technique.get() and not self._technique_touched and not typed:
+            self.technique.set(technique)
+            self.technique_changed()
+            notes.append(f'technique set to {technique}')
+        elif technique and technique != self.technique.get():
+            notes.append(f'this looks like {technique} data, but the technique was left as {self.technique.get()}')
+        self._technique_touched = True  # decide once; later files never flip the technique
+        conflicts = []
+        filled = self.fill_conditions(result.get('conditions') or {}, conflicts)
+        if filled:
+            notes.append('filled in ' + ', '.join(filled))
+        notes += conflicts
+        if result.get('date') and self.when.get() == date.today().isoformat():
+            self.when.set(result['date'])
+            notes.append(f"date measured {result['date']}")
+        if result.get('title') and not self.title_entry.get().strip():
+            self.title_entry.insert(0, result['title'])
+            notes.append('short description')
+        return [f'{name}: ' + '; '.join(notes)] if notes else []
+
+    def render_found(self, notes=()):
+        if not self.found:
+            return self.found_label.configure(text='')
+        lines = []
+        for name, result in self.found:
+            lines.append(f"✓  {name} — recognised as {result['label']}.")
+            for key, value in list((result.get('metadata') or {}).items())[:8]:
+                lines.append(f'      {key}: {value}')
+            for key, value in (result.get('results') or {}).items():
+                if key != 'calculation':
+                    lines.append(f'      {records.result_label(key)}: {records.format_value(key, value)}')
+            for item in result.get('derived') or []:
+                lines.append(f"      + adds {self.derived_name(name, item)} ({item['description']})")
+            for warning in result.get('warnings') or []:
+                lines.append(f'      Note: {warning}')
+        if notes:
+            lines.append('Filled in from your files (check them): ' + ' · '.join(notes))
+        self.found_label.configure(text='\n'.join(lines))
+
+    @staticmethod
+    def derived_name(name, item):
+        return f"{Path(name).stem} - {item['suffix']}"
+
+    def derived_items(self):
+        chosen = {i.name for i in self.files.items}
+        first = next((name for name, result in self.found if result.get('results')), None)
+        return [FileItem(name=self.derived_name(name, item), content=item['content'])
+            for name, result in self.found if name == first or not result.get('results')
+            for item in result.get('derived') or [] if self.derived_name(name, item) not in chosen]
 
     def values(self):
         return dict(sample=self.sample.get_value() or '', technique=self.technique.get(), date=self.when.get(),
             title=self.title_entry.get(), conditions={k: w.get() for k, w in self.condition_widgets.items()},
-            pooled=self.pooled.get(), notes=text_value(self.notes), files=self.files.paths())
+            pooled=self.pooled.get(), notes=text_value(self.notes), files=self.files.paths(),
+            protocol=self.protocol_box.get_value() or '', analysis_of=self.analysis_of.get(),
+            technique_touched=self._technique_touched)
 
     def save_draft(self):
         if self._loading:
@@ -1906,9 +2120,12 @@ class UploadForm(Page):
             self.when.set(values.get('date') or date.today())
             self.title_entry.insert(0, values.get('title', ''))
             self.pooled.insert(0, values.get('pooled', ''))
+            self.analysis_of.set(values.get('analysis_of', ''))
             set_text(self.notes, values.get('notes'))
             self.files.set_paths(values.get('files', []))
             self._pending_sample = values.get('sample')
+            self._pending_protocol = values.get('protocol')
+            self._technique_touched = bool(values.get('technique_touched', True))
         finally:
             self._loading = False
 
@@ -1918,25 +2135,40 @@ class UploadForm(Page):
             self.sample.set_value(None)
             self.when.set(date.today())
             self.title_entry.delete(0, 'end'); self.pooled.delete(0, 'end')
+            self.analysis_of.set('')
             set_text(self.notes, '')
             self.build_conditions()
+            self.protocol_box.set_value(None); self.protocol = None; self.protocol_note.configure(text='')
+            self._protocol_filled = {}
+            self._technique_touched = False
+            self._read_cache.clear()
             self.files.set_paths([])
         finally:
             self._loading = False
         self.app.settings.clear_draft(self.DRAFT)
         self.update_preview()
 
-    def shown(self, sample=None, **kwargs):
+    def shown(self, sample=None, protocol_id=None, **kwargs):
         self.data_changed()
         if sample:
             self.sample.set_value(sample['id'])
+        if protocol_id:
+            if ids.TECHNIQUE_BY_LABEL.get(self.technique.get()) not in ('RXN', 'HTE', 'PILOT'):
+                self.technique.set(ids.TECHNIQUES['RXN']); self.technique_changed()
+            self.protocol_box.set_value(protocol_id)
+            self.pick_protocol(protocol_id)
         self.update_preview()
 
     def data_changed(self):
         self.sample.set_items(self.app.sample_choices())
+        self.protocol_box.set_items([(p['id'], f"{p['id']}  ·  {p['name']}") for p in self.app.test_protocols()])
         if getattr(self, '_pending_sample', None) and self.app.samples:
             self.sample.set_value(self._pending_sample)
             self._pending_sample = None
+        if getattr(self, '_pending_protocol', None) and self.app.procedures:
+            pid, self._pending_protocol = self._pending_protocol, None
+            self.protocol_box.set_value(pid)
+            self.pick_protocol(pid)
         self.update_preview()
 
     def changed(self):
@@ -1960,13 +2192,31 @@ class UploadForm(Page):
         if hasattr(self, 'id_preview'):
             data_id = self.next_id()
             self.id_preview.configure(text=f'Will be saved as  {data_id}' if data_id else 'Choose a sample to see the data ID.')
+            current, sample_id = self.app.current, self.sample.get_value()
+            self.analysis_of.configure(values=[d['id'] for d in current['data']]
+                if current and sample_id and current['sample']['id'] == sample_id else [])
 
     def inputs(self):
         """Everything typed in the form, read on the UI thread."""
+        reactor = ids.TECHNIQUE_BY_LABEL.get(self.technique.get()) in ('RXN', 'HTE', 'PILOT')
+        extracted, results = [], {}
+        derived = {i.name for i in self.derived_items()}
+        for name, found in self.found:
+            warnings = list(found.get('warnings') or [])
+            if found.get('results') and results:
+                warnings.append('Only the first workbook in a record is calculated. Upload other runs as their own records.')
+            elif found.get('results'):
+                results = dict(found['results'], source_file=name)
+            extracted.append(dict(file=name, reader=found['reader'], label=found['label'],
+                metadata=found.get('metadata') or {}, warnings=warnings,
+                derived_files=[n for n in (self.derived_name(name, d) for d in found.get('derived') or []) if n in derived]))
+        analysis = self.analysis_of.get().strip()
         return dict(sample_id=self.sample.get_value() or '', technique=self.technique.get(), profile=self.app.settings.profile,
             measured_date=self.when.get(), conditions={k: w.get() for k, w in self.condition_widgets.items()},
             notes=text_value(self.notes), title=self.title_entry.get(), pooled_with=self.pooled.get().split(','),
-            files=[i.name for i in self.files.items], app_version=__version__)
+            files=[i.name for i in self.files.items] + [i.name for i in self.derived_items()], app_version=__version__,
+            protocol=self.protocol if reactor else None, derived_from=[analysis] if analysis else [],
+            extracted=extracted, results=results)
 
     def build_record(self, data_id, inputs=None):
         return records.data_record(data_id=data_id, **(inputs or self.inputs()))
@@ -1984,17 +2234,18 @@ class UploadForm(Page):
             return app.error('Choose the measurement date.')
         try:
             record, problems = self.build_record(self.next_id())
-            check_files(self.files.items)
+            check_files(self.files.items + self.derived_items())
         except (records.RecordError, ids.IdError) as error:
             return app.error(error)
         except StoreError as error:
             record, problems = self.build_record(self.next_id())[0], [str(error)]
         if not app.connected(quiet=True):
             problems = problems + ['Connect to SciSure to save (your draft is kept).']
-        PreviewDialog(app, 'Save data', record['id'], records.summary_lines(record), self.files.items, problems, self.save)
+        PreviewDialog(app, 'Save data', record['id'], records.summary_lines(record), self.files.items + self.derived_items(),
+            problems, self.save)
 
     def save(self):
-        app, files, inputs, values = self.app, list(self.files.items), self.inputs(), self.values()
+        app, files, inputs, values = self.app, list(self.files.items) + self.derived_items(), self.inputs(), self.values()
         sample = app.find_sample(inputs['sample_id'])
         if not sample:
             return app.error('Choose the sample this data belongs to.')
@@ -2025,14 +2276,15 @@ class UploadForm(Page):
 # ============================================================================ procedures
 class ProceduresPage(Page):
     def build(self):
-        actions = self.heading(self.frame, 'Procedures', 'Shared master recipes. Each lab follows the same procedure and '
-            'records only what it did differently on each sample.')
+        actions = self.heading(self.frame, 'Procedures', 'Shared master recipes (PRC) and test protocols (TST). Each lab '
+            'follows the same one and records only what it did differently.')
         ttk.Button(actions, text='+ New procedure', style='Primary.TButton', command=lambda: self.app.show('procedure_form')).pack(side='left')
+        ttk.Button(actions, text='+ New test protocol', command=lambda: self.app.show('procedure_form', category='testing')).pack(side='left', padx=6)
         body = ttk.Frame(self.frame, style='Page.TFrame')
         body.pack(fill='both', expand=True)
         left = Card(body, padding=14)
         left.pack(side='left', fill='y', padx=(0, 14))
-        frame, self.view = tree(left.body, (('id', 'ID', 120), ('name', 'Name', 180)), height=18)
+        frame, self.view = tree(left.body, (('id', 'ID', 110), ('type', 'Type', 70), ('name', 'Name', 170)), height=18)
         frame.pack(fill='both', expand=True)
         self.view.bind('<<TreeviewSelect>>', lambda _e: self.select())
         right = Card(body, padding=18)
@@ -2046,7 +2298,8 @@ class ProceduresPage(Page):
         self.version.pack(side='right')
         buttons = ttk.Frame(right.body)
         buttons.pack(fill='x', pady=(8, 0))
-        ttk.Button(buttons, text='Make a sample with this', style='Primary.TButton', command=self.make_sample).pack(side='left')
+        self.use_button = ttk.Button(buttons, text='Make a sample with this', style='Primary.TButton', command=self.make_sample)
+        self.use_button.pack(side='left')
         ttk.Button(buttons, text='Save a new version', command=self.new_version).pack(side='left', padx=6)
         ttk.Button(buttons, text='Download documents', command=self.download).pack(side='left')
         ttk.Button(buttons, text='Edit this version…', command=self.correct).pack(side='left', padx=6)
@@ -2062,7 +2315,8 @@ class ProceduresPage(Page):
     def data_changed(self):
         self.view.delete(*self.view.get_children())
         for p in self.app.procedures:
-            self.view.insert('', 'end', iid=str(p['experiment_id']), values=(p['id'], p['name']))
+            self.view.insert('', 'end', iid=str(p['experiment_id']), values=(p['id'],
+                'Testing' if p.get('category') == 'testing' else 'Synthesis', p['name']))
 
     def select(self):
         selection = self.view.selection()
@@ -2075,6 +2329,7 @@ class ProceduresPage(Page):
         if not value:
             return
         self.name.configure(text=f"{value['id']}  ·  {value['name']}")
+        self.use_button.configure(text='Upload reactor data with this' if value.get('category') == 'testing' else 'Make a sample with this')
         self.version.configure(values=[f"version {v['version']}" for v in value['versions']])
         if value['versions']:
             self.version.set(f"version {value['versions'][-1]['version']}")
@@ -2100,8 +2355,11 @@ class ProceduresPage(Page):
             ttk.Label(self.details.body, text='Document: ' + str(f.get('realName')), style='Hint.TLabel').pack(anchor='w', pady=(6, 0))
 
     def make_sample(self):
-        if self.selected_procedure:
-            self.app.show('new_sample', procedure_id=self.selected_procedure['id'])
+        p = self.selected_procedure
+        if p and p.get('category') == 'testing':
+            self.app.show('upload', protocol_id=p['id'])
+        elif p:
+            self.app.show('new_sample', procedure_id=p['id'])
 
     def new_version(self):
         version = self.current_version()
@@ -2135,28 +2393,34 @@ class ProcedureForm(Page):
     DRAFT = 'procedure'
 
     def build(self):
-        self.base = None
-        self.head_actions = self.heading(self.frame, 'New procedure', 'Write the master recipe once. Every lab picks it '
-            'when registering a sample; the fields below become the sample form\'s starting point.')
-        self.title_label = self.title_widget
+        self.base, self.category = None, 'synthesis'
+        self.head_actions = self.heading(self.frame, 'New procedure', '')
+        self.title_label, self.subtitle_label = self.title_widget, self.subtitle_widget
         ttk.Button(self.head_actions, text='Cancel', command=lambda: self.app.show('procedures')).pack(side='left')
         scroll = ScrollFrame(self.frame, style='Page.TFrame')
         scroll.pack(fill='both', expand=True)
         card = Card(scroll.body, padding=18)
         card.pack(fill='x', pady=(0, 12))
         self.name = ttk.Entry(card.body, width=50)
-        field(card.body, 0, 'Procedure name', self.name, 'Short and specific, e.g. "K-promoted Mo2C/γ-Al2O3 by IWI + carburization"')
+        field(card.body, 0, 'Name', self.name, 'Short and specific, e.g. "K-promoted Mo2C/γ-Al2O3 by IWI + carburization" '
+            'or "CO2 to methanol, 250 °C, 30 bar"')
+        self.import_button = ttk.Button(card.body, text='Fill in from a document (.docx)…', command=self.import_document)
+        self.import_button.grid(row=1, column=1, sticky='w')
         self.description = text_box(card.body, height=2)
-        field(card.body, 2, 'Purpose / when to use it (optional)', self.description)
+        field(card.body, 2, 'Purpose / when to use it (optional)', self.description, span=2)
+        self.import_note = ttk.Label(card.body, style='Hint.TLabel', wraplength=820, justify='left')
+        self.import_note.grid(row=4, column=0, columnspan=2, sticky='w', pady=(6, 0))
         card.body.columnconfigure(0, weight=1)
-        recipe = Card(scroll.body, padding=18)
-        recipe.pack(fill='x', pady=(0, 12))
-        ttk.Label(recipe.body, text='Recipe', style='Sub.TLabel').grid(row=0, column=0, sticky='w')
-        self.recipe = RecipeFields(recipe.body, lambda: None)
-        files = Card(scroll.body, padding=18)
-        files.pack(fill='x', pady=(0, 12))
-        ttk.Label(files.body, text='Procedure documents (optional)', style='Sub.TLabel').pack(anchor='w')
-        self.files = FileList(files.body)
+        self.templates = {}
+        for category, title, fields in (('synthesis', 'Recipe', records.RECIPE_FIELDS),
+                ('testing', 'Test conditions', records.TEST_FIELDS)):
+            box = Card(scroll.body, padding=18)
+            ttk.Label(box.body, text=title, style='Sub.TLabel').grid(row=0, column=0, sticky='w')
+            self.templates[category] = (box, RecipeFields(box.body, lambda: None, fields=fields))
+        self.files_card = Card(scroll.body, padding=18)
+        self.files_card.pack(fill='x', pady=(0, 12))
+        ttk.Label(self.files_card.body, text='Documents (optional)', style='Sub.TLabel').pack(anchor='w')
+        self.files = FileList(self.files_card.body)
         self.files.pack(fill='x')
         foot = ttk.Frame(self.frame, style='Page.TFrame')
         foot.pack(fill='x', pady=(10, 0))
@@ -2164,29 +2428,77 @@ class ProcedureForm(Page):
         self.id_preview.pack(side='left')
         ttk.Button(foot, text='Preview & save', style='Primary.TButton', command=self.preview).pack(side='right')
 
-    def shown(self, base=None, **kwargs):
+    @property
+    def recipe(self):
+        return self.templates[self.category][1]
+
+    def set_category(self, category):
+        self.category = category
+        for key, (box, _fields) in self.templates.items():
+            box.pack_forget()
+        self.templates[category][0].pack(fill='x', pady=(0, 12), before=self.files_card)
+        testing = category == 'testing'
+        (self.import_button.grid() if testing else self.import_button.grid_remove())
+        self.subtitle_label.configure(text='Write the standard test conditions once. Each reactor upload picks the protocol; '
+            'anything a run does differently is recorded automatically.' if testing else 'Write the master recipe once. '
+            'Every lab picks it when registering a sample; the fields below become the sample form\'s starting point.')
+
+    def next_id(self):
+        p = self.app.settings.profile
+        return ids.next_procedure_id(p['lab'], [x['id'] for x in self.app.procedures],
+            prefix='TST' if self.category == 'testing' else 'PRC')
+
+    def shown(self, base=None, category=None, **kwargs):
         self.base = base
         self.files.set_paths([])
+        self.import_note.configure(text='')
         if base:
             record = base['record']
+            self.set_category(record.get('category', 'synthesis'))
             self.title_label.configure(text=f"New version of {base['id']}")
             self.name.delete(0, 'end'); self.name.insert(0, record['name'])
             set_text(self.description, record.get('description', ''))
             self.recipe.set(record['recipe'])
             self.id_preview.configure(text=f"Will be saved as  {base['id']} version {base['versions'][-1]['version'] + 1}")
         else:
-            self.title_label.configure(text='New procedure')
+            self.set_category(category or 'synthesis')
+            self.title_label.configure(text='New test protocol' if self.category == 'testing' else 'New procedure')
             self.name.delete(0, 'end'); set_text(self.description, ''); self.recipe.set({})
-            p = self.app.settings.profile
             try:
-                pid = ids.next_procedure_id(p['lab'], [x['id'] for x in self.app.procedures])
-                self.id_preview.configure(text=f'Will be saved as  {pid} version 1')
+                self.id_preview.configure(text=f'Will be saved as  {self.next_id()} version 1')
             except (KeyError, ids.IdError):
                 self.id_preview.configure(text='')
 
+    def import_document(self, path=None):
+        from . import filereaders
+        path = path or (filedialog.askopenfilename(parent=self.app.root, title='Choose the testing-conditions document',
+            filetypes=[('Word document', '*.docx')]) if not self.app.smoke else None)
+        if not path:
+            return
+        try:
+            if Path(path).stat().st_size > filereaders.MAX_BYTES:
+                return self.app.error('That document is larger than 20 MB.')
+            values = filereaders.read_test_protocol(Path(path).name, Path(path).read_bytes())
+        except OSError as error:
+            return self.app.error(friendly(error))
+        if not values:
+            return self.app.error('No test conditions were found in that document. It needs its conditions in tables '
+                '(a label in one column and the value in the next).')
+        current = self.recipe.get()
+        merged = {**values, **{k: v for k, v in current.items() if v not in ('', None, [])}}
+        if current.get('steps') and values.get('steps') and values['steps'] not in current['steps']:
+            merged['steps'] = current['steps'].rstrip() + '\n\n' + values['steps']
+        self.recipe.set(merged)
+        if not any(i.path and str(i.path) == str(path) for i in self.files.items):
+            self.files.add([path])
+        self.import_note.configure(text=f'Filled in {len(values)} field(s) from {Path(path).name} (fields you had already '
+            'typed were kept). Check them before saving. Rows that did not match a field are under "Procedure and notes". '
+            'The document is attached too.')
+
     def inputs(self):
         return dict(version=1, name=self.name.get(), profile=self.app.settings.profile, recipe=self.recipe.get(),
-            description=text_value(self.description), files=[i.name for i in self.files.items], app_version=__version__)
+            description=text_value(self.description), files=[i.name for i in self.files.items], app_version=__version__,
+            category=self.category)
 
     def build_record(self, procedure_id, inputs=None):
         return records.procedure_record(procedure_id=procedure_id, **(inputs or self.inputs()))
@@ -2195,7 +2507,7 @@ class ProcedureForm(Page):
         app = self.app
         if not app.settings.has_profile():
             return app.error('Set up your profile in Settings first.')
-        pid = self.base['id'] if self.base else ids.next_procedure_id(app.settings.profile['lab'], [x['id'] for x in app.procedures])
+        pid = self.base['id'] if self.base else self.next_id()
         record, problems = self.build_record(pid)
         try:
             check_files(self.files.items, required=False)
@@ -2203,29 +2515,31 @@ class ProcedureForm(Page):
             problems.append(str(error))
         if not app.connected(quiet=True):
             problems.append('Connect to SciSure to save.')
-        PreviewDialog(app, 'Save procedure', self.id_preview.cget('text').replace('Will be saved as  ', ''),
-            records.summary_lines(record)[1:], self.files.items, problems, self.save)
+        PreviewDialog(app, 'Save test protocol' if self.category == 'testing' else 'Save procedure',
+            self.id_preview.cget('text').replace('Will be saved as  ', ''), records.summary_lines(record)[1:],
+            self.files.items, problems, self.save)
 
     def save(self):
         app, files, base, inputs = self.app, list(self.files.items), self.base, self.inputs()
         if getattr(self, '_saving', False):
-            return app.error('This procedure is still being saved.')
+            return app.error('This is still being saved.')
         self._saving = True
-        build = lambda pid: records.procedure_record(procedure_id=pid or 'PRC-UR-000', **inputs)[0]
+        placeholder = 'TST-UR-000' if inputs['category'] == 'testing' else 'PRC-UR-000'
+        build = lambda pid: records.procedure_record(procedure_id=pid or placeholder, **inputs)[0]
         def work(progress):
             if base:
                 return app.store.add_procedure_version(base, build, files, progress)
             return app.store.create_procedure(build, files, progress)
         def failed(error):
             self._saving = False
-            app.error(str(friendly(error)) + '\n\nYour procedure is kept. Click Preview & save again to finish.')
+            app.error(str(friendly(error)) + '\n\nYour work is kept. Click Preview & save again to finish.')
         def done(saved):
             self._saving = False
             record = saved['record']
             app.procedure_cache.pop(record['id'], None)
             app.info(f"Saved {record['id']} version {record['version']}." + readable_note(saved))
             app.refresh(then=lambda: app.show('procedures'))
-        app.run('Saving procedure…', work, done, failed)
+        app.run('Saving…', work, done, failed)
 
 
 # ============================================================================ export & AI
@@ -2628,6 +2942,12 @@ class HelpPage(Page):
             'Only typed text and file locations are kept, not the files themselves.'),
         ('Procedures', 'A procedure is the shared master recipe. Improve it with "Save a new version"; samples always '
             'record which version they followed.'),
+        ('Test protocols', 'Procedures → "+ New test protocol" stores standard reactor testing conditions (e.g. '
+            'TST-NU-001). Fill it in from a Word document with "Fill in from a document". When uploading reactor data, '
+            'pick the protocol: its conditions fill in, and what your run did differently is recorded.'),
+        ('Files the app reads', 'Adding a Northwestern GC workbook or a SLAC raw EXAFS scan to an upload fills in the '
+            'form for you. GC workbooks also get CO2 conversion and selectivity calculated the same way for every lab. '
+            'The original files are stored unchanged.'),
         ('Edit a record', 'Open the sample → "Edit" to change its details, or, if the ID itself is wrong, mark '
             'it "Registered in error" and register it again. For data, select the record → "Edit" → change it (replace '
             'a wrong file) or withdraw it. Every correction needs a reason and earlier versions are kept. Your lab '

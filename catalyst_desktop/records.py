@@ -49,6 +49,84 @@ RECIPE_FIELDS = (
 RECIPE_KEYS = tuple(f[0] for f in RECIPE_FIELDS)
 RECIPE_LABELS = {f[0]: f[1] for f in RECIPE_FIELDS}
 
+# --------------------------------------------------------------------------
+# Test protocol template (shared reactor testing conditions; each run records what differed)
+# --------------------------------------------------------------------------
+TEST_FIELDS = (
+    ('reaction', 'Reaction', 'text', None, 'e.g. CO2 hydrogenation to methanol'),
+    ('reactor', 'Reactor', 'text', None, 'e.g. fixed bed, stainless steel, 1/2 in'),
+    ('reactor_id_cm', 'Reactor inner diameter (cm)', 'number', None, ''),
+    ('catalyst_mass_g', 'Catalyst mass (g)', 'number', None, ''),
+    ('sieve_um', 'Catalyst sieve fraction (µm)', 'number', None, ''),
+    ('diluent', 'Diluent', 'text', None, 'e.g. quartz sand, SiC'),
+    ('diluent_sieve_um', 'Diluent sieve fraction (µm)', 'number', None, ''),
+    ('diluent_mass_g', 'Diluent mass (g)', 'number', None, ''),
+    ('bed_length_cm', 'Catalyst bed length (cm)', 'number', None, 'without diluent'),
+    ('bed_volume_cm3', 'Catalyst bed volume (cm³)', 'number', None, 'without diluent'),
+    ('GHSV_h', 'GHSV (h⁻¹)', 'number', None, ''),
+    ('total_flow_mL_min', 'Total flow (mL/min)', 'number', None, ''),
+    ('pretreatment_gas', 'Pretreatment gas', 'text', None, 'e.g. H2'),
+    ('pretreatment_flow_mL_min', 'Pretreatment flow (mL/min)', 'number', None, ''),
+    ('pretreatment_ramp_C_min', 'Pretreatment ramp (°C/min)', 'number', None, ''),
+    ('pretreatment_T_C', 'Pretreatment temperature (°C)', 'number', None, ''),
+    ('pretreatment_time_h', 'Pretreatment time (h)', 'number', None, ''),
+    ('reaction_T_C', 'Reaction temperature (°C)', 'number', None, ''),
+    ('pressure_bar', 'Reaction pressure (bar)', 'number', None, ''),
+    ('feed', 'Feed composition and flows', 'text', None, 'e.g. CO2 10 + H2 30 mL/min (H2:CO2 = 3:1)'),
+    ('stabilization_h', 'Stabilization time (h)', 'number', None, ''),
+    ('gc_method', 'GC method', 'text', None, 'oven program'),
+    ('gc_split_ratio', 'GC split ratio', 'text', None, 'e.g. 10:1'),
+    ('gc_analysis_min', 'GC analysis time per point (min)', 'number', None, ''),
+    ('pressurization', 'Pressurization', 'long', None, 'e.g. He 40 mL/min, 1 bar/min at 250 °C'),
+    ('steps', 'Procedure and notes', 'long', None, 'Anything else another lab needs to run the test the same way.'),
+)
+TEST_LABELS = {f[0]: f[1] for f in TEST_FIELDS}
+CATEGORIES = {'synthesis': 'Synthesis procedure', 'testing': 'Test protocol'}
+
+
+def fields_for(record_or_category):
+    """Template fields of a procedure record (or a category name)."""
+    category = record_or_category if isinstance(record_or_category, str) else (record_or_category or {}).get('category')
+    return TEST_FIELDS if category == 'testing' else RECIPE_FIELDS
+
+
+def same_value(a, b):
+    """'250' == '250 °C' == '250.0'; '11000 h-1' == '11,000 h-1'; feeds compare gas by gas. Otherwise exact text."""
+    a, b = str(a or '').strip(), str(b or '').strip()
+    if a == b:
+        return True
+    from .filereaders import numbers
+    gases = lambda t: sorted(re.findall(r'\b([A-Z][A-Za-z0-9]*)\s+(\d[\d.,]*)', t))
+    if gases(a) or gases(b):
+        return gases(a) == gases(b) and numbers(a) == numbers(b)
+    na, nb = numbers(a), numbers(b)
+    return bool(na) and na == nb
+
+
+def protocol_conditions(recipe):
+    """Run conditions (reactor data form) that follow from a test protocol."""
+    r = recipe or {}
+    def num(key):
+        value = r.get(key)
+        return None if value in (None, '') else f'{value:g}' if isinstance(value, (int, float)) else str(value)
+    out = {}
+    for protocol_key, condition_key in (('reaction_T_C', 'temperature_C'), ('pressure_bar', 'pressure_bar'),
+            ('total_flow_mL_min', 'flow_mL_min'), ('feed', 'feed')):
+        if num(protocol_key):
+            out[condition_key] = num(protocol_key)
+    if num('GHSV_h'):
+        out['GHSV'] = f"{num('GHSV_h')} h-1"
+    if isinstance(r.get('catalyst_mass_g'), (int, float)):
+        out['catalyst_mass_mg'] = f"{r['catalyst_mass_g'] * 1000:g}"
+    pre = ', '.join(x for x in (
+        ' '.join(x for x in (r.get('pretreatment_gas'), f"{num('pretreatment_flow_mL_min')} mL/min" if num('pretreatment_flow_mL_min') else '') if x),
+        f"{num('pretreatment_ramp_C_min')} °C/min to" if num('pretreatment_ramp_C_min') else '',
+        f"{num('pretreatment_T_C')} °C" if num('pretreatment_T_C') else '',
+        f"{num('pretreatment_time_h')} h" if num('pretreatment_time_h') else '') if x).replace('to, ', 'to ')
+    if pre:
+        out['pretreatment'] = pre
+    return out
+
 SAMPLE_STATES = ('As synthesized', 'Calcined', 'Reduced / activated', 'Passivated', 'Spent (after reaction)',
     'Regenerated', 'Pelletized / sieved', 'Technical form (extrudate, pellet)', 'Other')
 
@@ -187,12 +265,12 @@ def number_or_none(value, label):
         raise RecordError(f'{label}: enter a number (no units).') from None
 
 
-def clean_recipe(values):
+def clean_recipe(values, fields=RECIPE_FIELDS):
     recipe, problems = {}, []
     values = dict(values or {})
-    if 'components' not in values and values.get('metals'):
+    if fields is RECIPE_FIELDS and 'components' not in values and values.get('metals'):
         values['components'] = parse_metals(values['metals'])  # records saved before components existed
-    for key, label, kind, _, _ in RECIPE_FIELDS:
+    for key, label, kind, _, _ in fields:
         raw = values.get(key, '')
         if kind == 'components':
             recipe[key], component_problems = clean_components(raw)
@@ -327,7 +405,8 @@ def revise(previous, updated, profile, note, status=None, status_note=''):
     note = clean_text(note, 1000)
     if not note:
         problems.append('Say briefly why the record is being corrected (kept in its history).')
-    record = dict(updated)
+    record = dict(previous)  # fields this app version doesn't know about are carried forward, never dropped
+    record.update(updated)
     for key in ('kind', 'id', 'created_at', 'created_by', 'format'):
         if key in previous:
             record[key] = previous[key]
@@ -350,22 +429,34 @@ def sample_date(record):
     return record.get('synthesis_date') or record.get('received_date')
 
 
-def procedure_record(*, procedure_id, version, name, profile, recipe, description='', files=(), app_version=''):
+def procedure_record(*, procedure_id, version, name, profile, recipe, description='', files=(), app_version='',
+        category='synthesis'):
+    """A synthesis procedure (PRC-…) or a test protocol (TST-…): a shared, versioned template."""
     problems = []
+    category = category if category in CATEGORIES else 'synthesis'
+    testing = category == 'testing'
     name = one_line(name, 120)
     if not name:
-        problems.append('Give the procedure a short name (e.g. "Mo2C carburization").')
-    recipe, recipe_problems = clean_recipe(recipe)
+        problems.append('Give the test protocol a short name (e.g. "CO2 to methanol, 250 °C, 30 bar").' if testing
+            else 'Give the procedure a short name (e.g. "Mo2C carburization").')
+    recipe, recipe_problems = clean_recipe(recipe, fields_for(category))
     problems += recipe_problems
-    if not (recipe.get('steps') or files):
+    if testing and not (any(v not in (None, '') for v in recipe.values()) or files):
+        problems.append('Fill in the test conditions or attach the protocol document.')
+    if not testing and not (recipe.get('steps') or files):
         problems.append('Add the step-by-step recipe or attach the procedure document.')
-    return dict(format=RECORD_FORMAT, kind='procedure', id=procedure_id, version=int(version), name=name,
+    record = dict(format=RECORD_FORMAT, kind='procedure', id=procedure_id, version=int(version), name=name,
         created_at=now(), created_by=person(profile), description=clean_text(description), recipe=recipe,
-        files=list(files), app_version=app_version), problems
+        files=list(files), app_version=app_version)
+    if testing:
+        record['category'] = 'testing'
+    return record, problems
 
 
 def data_record(*, data_id, sample_id, technique, profile, measured_date, conditions=None, notes='', title='',
-        pooled_with=(), files=(), app_version=''):
+        pooled_with=(), files=(), app_version='', protocol=None, derived_from=(), extracted=(), results=None):
+    """One measurement. ``protocol`` is the test protocol version followed (reactor data), ``derived_from`` the raw
+    data this analysis was made from, ``extracted`` what CATALYST read from each file, ``results`` computed values."""
     problems = []
     code = ids.technique_code(technique)
     if not files:
@@ -373,11 +464,29 @@ def data_record(*, data_id, sample_id, technique, profile, measured_date, condit
     pooled = [p.strip() for p in pooled_with if p.strip()]
     if any(not ids.parse_sample_id(p) for p in pooled):
         problems.append('Other samples in the same test must be sample IDs.')
+    sources = [d.strip() for d in derived_from if d and d.strip()]
+    if any(not ids.DATA_RE.fullmatch(d) for d in sources):
+        problems.append('"Analysis of" must be data IDs, e.g. UR-MDP-260925-01-XAS-01.')
+    if any(d == data_id for d in sources):
+        problems.append('A record cannot be an analysis of itself.')
     conditions = {k: clean_text(v, 500) for k, v in (conditions or {}).items() if str(v or '').strip()}
-    return dict(format=RECORD_FORMAT, kind='data', id=data_id, sample_id=sample_id, technique=code,
+    record = dict(format=RECORD_FORMAT, kind='data', id=data_id, sample_id=sample_id, technique=code,
         technique_label=ids.TECHNIQUES[code], created_at=now(), created_by=person(profile),
         date=ids.as_date(measured_date).isoformat(), title=one_line(title, 120), conditions=conditions,
-        notes=clean_text(notes), pooled_with=pooled, files=list(files), app_version=app_version), problems
+        notes=clean_text(notes), pooled_with=pooled, files=list(files), app_version=app_version)
+    if protocol:
+        expected = protocol_conditions(protocol.get('recipe'))
+        record['protocol'] = dict(id=protocol['id'], version=protocol.get('version'), name=protocol.get('name', ''))
+        labels = {f[0]: f[1] for f in condition_fields(code)}
+        record['protocol_deviations'] = [dict(field=k, label=labels.get(k, k), protocol=v, run=conditions.get(k, ''))
+            for k, v in expected.items() if not same_value(conditions.get(k, ''), v)]
+    if sources:
+        record['derived_from'] = sources
+    if extracted:
+        record['extracted'] = list(extracted)
+    if results:
+        record['results'] = dict(results)
+    return record, problems
 
 
 def shipment_record(*, shipment_id, sample_id, profile, to_lab, ship_date, amount='', tracking='', notes='',
@@ -477,16 +586,29 @@ def format_value(key, value):
     return '—' if value in (None, '') else str(value)
 
 
-def recipe_lines(recipe):
+def recipe_lines(recipe, fields=RECIPE_FIELDS):
     recipe = dict(recipe or {})
-    if 'components' not in recipe and recipe.get('metals'):
+    if fields is RECIPE_FIELDS and 'components' not in recipe and recipe.get('metals'):
         recipe['components'] = parse_metals(recipe['metals'])
     lines = []
-    for key in RECIPE_KEYS:
+    for key, label, *_ in fields:
         value = (recipe or {}).get(key)
         if value not in (None, '', []):
-            lines.append((RECIPE_LABELS[key], format_value(key, value)))
+            lines.append((label, format_value(key, value)))
     return lines
+
+
+RESULT_LABELS = {'co2_conversion_pct': 'CO2 conversion (%)', 'time_on_stream_h': 'Time on stream (h)',
+    'injections': 'GC injections', 'averaged_over_last': 'Averaged over last injections',
+    'last_injection_time_min': 'Last injection (min after the first)', 'status': 'Calculation status',
+    'source_file': 'Calculated from'}
+
+
+def result_label(key):
+    if key in RESULT_LABELS:
+        return RESULT_LABELS[key]
+    match = re.fullmatch(r'selectivity_(.+)_pct', key)
+    return f'Selectivity to {match.group(1)} (%)' if match else key
 
 
 def readable_header(record):
@@ -499,7 +621,8 @@ def readable_header(record):
     if kind == 'shipment':
         return f"Shipment {record['from_lab']} → {record['to_lab']} — {record['id']} (readable copy)"
     if kind == 'procedure':
-        return f"Procedure {record['id']} version {record['version']} — {record['name']}"
+        noun = 'Test protocol' if record.get('category') == 'testing' else 'Procedure'
+        return f"{noun} {record['id']} version {record['version']} — {record['name']}"
     raise RecordError('Unknown record type.')
 
 
@@ -579,7 +702,23 @@ def _summary_lines(record):
         for key, value in record.get('conditions', {}).items():
             label = next((f[1] for f in condition_fields(record['technique']) if f[0] == key), key)
             lines.append((label, value))
+        if record.get('protocol'):
+            p = record['protocol']
+            lines.append(('Test protocol', f"{p['id']} v{p['version']} · {p.get('name', '')}"))
+            for d in record.get('protocol_deviations', []):
+                lines.append(('Differs from protocol', f"{d['label']}: {d['protocol']} → {d['run'] or '—'}"))
+        if record.get('derived_from'): lines.append(('Analysis of', ', '.join(record['derived_from'])))
         if record.get('pooled_with'): lines.append(('Tested together with', ', '.join(record['pooled_with'])))
+        for key, value in (record.get('results') or {}).items():
+            if key != 'calculation':
+                lines.append((result_label(key), format_value(key, value)))
+        if (record.get('results') or {}).get('calculation'):
+            lines.append(('How results were calculated', record['results']['calculation']))
+        for item in record.get('extracted', []):
+            details = '; '.join(f'{k}: {v}' for k, v in (item.get('metadata') or {}).items())
+            lines.append((f"Read from {item.get('file')}", f"{item.get('label', '')}" + (f' — {details}' if details else '')))
+            for warning in item.get('warnings', []):
+                lines.append(('Note', warning))
         if record.get('notes'): lines.append(('Notes', record['notes']))
         return lines
     if kind == 'shipment':
@@ -590,8 +729,9 @@ def _summary_lines(record):
             if record.get(key): lines.append((label, record[key]))
         return lines
     if kind == 'procedure':
-        lines = [('Procedure', f"{record['id']} v{record['version']}"), ('Name', record['name']), ('Written by', who)]
+        noun = 'Test protocol' if record.get('category') == 'testing' else 'Procedure'
+        lines = [(noun, f"{record['id']} v{record['version']}"), ('Name', record['name']), ('Written by', who)]
         if record.get('description'): lines.append(('Purpose', record['description']))
-        lines += recipe_lines(record['recipe'])
+        lines += recipe_lines(record['recipe'], fields_for(record))
         return lines
     return []

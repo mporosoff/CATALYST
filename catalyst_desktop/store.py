@@ -213,7 +213,8 @@ class Store:
         for row in self._experiments(self.workspace['procedures_study']):
             info = records.parse_procedure_experiment_name(row.get('name'))
             if info:
-                info.update(experiment_id=remote_id(row['experimentID']))
+                info.update(experiment_id=remote_id(row['experimentID']),
+                    category='testing' if ids.is_test_protocol(info['id']) else 'synthesis')
                 result.append(info)
         return sorted(result, key=lambda p: p['id'])
 
@@ -474,7 +475,7 @@ class Store:
         rows = self.files(section_id)
         in_use = {f['name'] for f in current.get('files', [])} | set(current.get('superseded_files') or [])
         leftovers = {f.get('realName') for f in rows} - in_use   # from an interrupted attempt: safe to reuse
-        chosen_names = set()
+        chosen_names, renamed = set(), {}
         active = [f for f in current.get('files', []) if f['name'] not in set(supersede)]
         if len(active) + len(new_files) > MAX_FILES:
             raise StoreError(f'A record can hold at most {MAX_FILES} current files.')
@@ -482,10 +483,16 @@ class Store:
             content = item.read()
             name = self._free_name(section_id, rows, item.name, content, revision, in_use | chosen_names, leftovers)
             chosen_names.add(name)
+            renamed[item.name] = name
             progress(f'Uploading and checking {name} ({index} of {len(new_files)})…')
             self._upload(section_id, name, content)
             active.append(dict(name=name, sha256=digest(content), size_bytes=len(content)))
         record = dict(updated, files=active, superseded_files=sorted(set(current.get('superseded_files') or []) | set(supersede)))
+        if renamed and record.get('extracted'):  # keep "read from" links pointing at the names actually saved
+            record['extracted'] = [dict(e, file=renamed.get(e.get('file'), e.get('file')),
+                derived_files=[renamed.get(n, n) for n in e.get('derived_files', [])]) for e in record['extracted']]
+        if renamed and (record.get('results') or {}).get('source_file') in renamed:
+            record['results'] = dict(record['results'], source_file=renamed[record['results']['source_file']])
         if record.get('history'):
             record['history'] = record['history'][:-1] + [dict(record['history'][-1], changes=records.changed_fields(current, record))]
         if record['kind'] == 'data' and not active and records.status_of(record) == 'active':
@@ -638,12 +645,13 @@ class Store:
         probe = build(None)
         lab = probe['created_by']['lab']
         existing = self.list_procedures()
-        key = 'reserved-procedure/' + lab + '/' + probe['name']
+        key = 'reserved-procedure/' + lab + '/' + probe.get('category', 'synthesis') + '/' + probe['name']
         procedure_id = self._ops.get(key)
         name = records.procedure_experiment_name(procedure_id, probe['name']) if procedure_id else None
         if not procedure_id or any(p['id'] == procedure_id and records.procedure_experiment_name(p['id'], p['name']) != name
                 for p in existing):
-            procedure_id = ids.next_procedure_id(lab, [p['id'] for p in existing])
+            procedure_id = ids.next_procedure_id(lab, [p['id'] for p in existing],
+                prefix='TST' if probe.get('category') == 'testing' else 'PRC')
         self._ops[key] = procedure_id
         record = build(procedure_id)
         progress(f'Creating {procedure_id} in SciSure…')

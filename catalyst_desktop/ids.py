@@ -52,7 +52,7 @@ TECHNIQUE_BY_LABEL = {label: code for code, label in TECHNIQUES.items()}
 
 SAMPLE_RE = re.compile(r'(?P<lab>[A-Z]{2,5})-(?P<initials>[A-Z]{2,4})-(?P<date>\d{6})-(?P<n>\d{2,3})')
 DATA_RE = re.compile(SAMPLE_RE.pattern + r'-(?P<tech>[A-Z]{2,6})-(?P<dn>\d{2,3})')
-PROCEDURE_RE = re.compile(r'PRC-(?P<lab>[A-Z]{2,5})-(?P<n>\d{3,4})')
+PROCEDURE_RE = re.compile(r'(?P<prefix>PRC|TST)-(?P<lab>[A-Z]{2,5})-(?P<n>\d{3,4})')  # PRC synthesis, TST testing
 
 
 class IdError(ValueError):
@@ -173,11 +173,16 @@ def next_data_id(sample, technique, existing):
     return f'{prefix}{number:02d}'
 
 
-def next_procedure_id(lab, existing):
+def is_test_protocol(procedure_id):
+    return str(procedure_id or '').startswith('TST-')
+
+
+def next_procedure_id(lab, existing, prefix='PRC'):
+    """PRC-LAB-NNN for a synthesis procedure, TST-LAB-NNN for a test protocol."""
     code = lab_code(lab)
     used = {int(m['n']) for value in existing
-        if (m := PROCEDURE_RE.fullmatch(str(value))) and m['lab'] == code}
+        if (m := PROCEDURE_RE.fullmatch(str(value))) and m['lab'] == code and m['prefix'] == prefix}
     number = 1
     while number in used:
         number += 1
-    return f'PRC-{code}-{number:03d}'
+    return f'{prefix}-{code}-{number:03d}'

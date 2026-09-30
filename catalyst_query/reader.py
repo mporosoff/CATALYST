@@ -95,14 +95,15 @@ class CatalystReader:
 
     # ------------------------------------------------------------------ procedures
     def procedures(self):
-        return [dict(procedure_id=p['id'], name=p['name']) for p in self._cached('procedures', self.store.list_procedures)]
+        return [dict(procedure_id=p['id'], name=p['name'], type=p.get('category', 'synthesis'))
+            for p in self._cached('procedures', self.store.list_procedures)]
 
     def procedure(self, procedure_id):
         match = next((p for p in self._cached('procedures', self.store.list_procedures) if p['id'] == procedure_id), None)
         if match is None:
             raise KeyError(f'No procedure {procedure_id}.')
         versions = self._cached('procedure/' + procedure_id, lambda: self.store.procedure_versions(match))
-        return dict(procedure_id=procedure_id, name=match['name'],
+        return dict(procedure_id=procedure_id, name=match['name'], type=match.get('category', 'synthesis'),
             versions=[dict(v['record'], file_names=[f.get('realName') for f in v['files']]) for v in versions])
 
     # ------------------------------------------------------------------ data

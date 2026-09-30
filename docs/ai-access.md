@@ -82,7 +82,12 @@ Every record is JSON with `format`, `kind` (`sample`, `data`, `shipment` or `pro
   - `conditions` (technique-specific, all optional)
   - `pooled_with` (other samples in the same test), `notes`
   - `files` (`name`, `sha256`, `size_bytes`)
+  - `protocol` (`id`, `version`, `name`) and `protocol_deviations` (`field`, `label`, `protocol`, `run`) when a test protocol was followed
+  - `derived_from` (the raw data IDs an analysis was made from)
+  - `extracted` (what CATALYST read from each file: `file`, `reader`, `label`, `metadata`, `warnings`)
+  - `results` (computed values, e.g. `co2_conversion_pct`, `selectivity_CH3OH_pct`, with a `calculation` text); per-injection values are in the `… - CATALYST results.csv` file
 - **shipment:** `sample_id`, `from_lab`, `to_lab`, `date`, `amount`, `tracking`, `notes`
+- **procedure:** `id` (`PRC-…` synthesis or `TST-…` test protocol), `version`, `name`, `category` (`testing` for test protocols), `recipe` (the synthesis template, or the test conditions in `records.TEST_FIELDS`)
 
 ## Corrections
 

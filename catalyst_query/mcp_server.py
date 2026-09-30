@@ -28,9 +28,11 @@ TOOLS = [
     dict(name='get_sample', description='Everything about one sample: the recipe actually used, automatic deviations from its '
         'master procedure, every data record from every lab (with conditions and file names), and its shipping log.',
         inputSchema=dict(S(sample_id=STR('e.g. UR-MDP-260925-01')), required=['sample_id'])),
-    dict(name='list_procedures', description='Shared master synthesis procedures.', inputSchema=S()),
-    dict(name='get_procedure', description='All versions of one master procedure with their full recipes.',
-        inputSchema=dict(S(procedure_id=STR('e.g. PRC-UR-001')), required=['procedure_id'])),
+    dict(name='list_procedures', description='Shared master synthesis procedures (PRC-…, type "synthesis") and reactor '
+        'test protocols (TST-…, type "testing").', inputSchema=S()),
+    dict(name='get_procedure', description='All versions of one synthesis procedure or test protocol with its full '
+        'template (recipe or test conditions).', inputSchema=dict(S(procedure_id=STR('e.g. PRC-UR-001 or TST-NU-001')),
+        required=['procedure_id'])),
     dict(name='find_data', description='Flat table (one row per measurement) with conditions and the sample\'s recipe '
         'columns — good for comparing labs or building a training set. Narrow it with technique/search/lab; reading '
         'many samples can take a while.', inputSchema=S(technique=STR('technique code, e.g. RXN, XRD, XAS, BET'),
